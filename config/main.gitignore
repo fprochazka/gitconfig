@@ -45,3 +45,6 @@ Thumbs.db
 .buildpath
 
 docker-compose.local.yml
+
+# Well-known files that we know must be commited
+!gradle-wrapper.jar
