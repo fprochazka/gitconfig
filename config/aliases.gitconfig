@@ -1,0 +1,48 @@
+[pretty]
+#	custom-log-oneline = "format:%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset %C(magenta)(%G?: %GS)%Creset"
+	custom-log-oneline = "format:%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset"
+
+[alias]
+	co = checkout
+	cp = cherry-pick
+	st = status
+	ap = add -p
+	ci = commit
+	qci = commit
+	cia = commit --amend
+
+	rb = rebase
+	rbm = !git rbi "$(git get-main-branch)"
+	rbmi = !git rbim
+	rbi = rebase -i
+	rbim = !git rbi "$(git get-main-branch)"
+	rba = rebase --abort
+	rbc = rebase --continue
+	rbs = rebase --skip
+
+	br = branch -vv --sort=-committerdate
+	b = branch -vv --sort=-committerdate
+
+	d = diff
+	dc = diff --cached
+	dw = diff --word-diff
+
+	mb = merge --no-ff
+	ff = merge --ff-only
+
+	stage = add
+	unstage = reset HEAD --
+
+	f = fetch --all --prune
+	fpush = push --force-with-lease
+
+	l =  log --graph --pretty=custom-log-oneline --abbrev-commit --date=relative
+	ls = "l --stat -m"
+	lp = "l -p"
+	lw = "l -p --color-words"
+
+	lb = !git l $(git get-current-branch)
+	logb = !git log $(git get-current-branch)
+
+	assume-unchanged = "update-index --assume-unchanged"
+	assume-changed = "update-index --no-assume-unchanged"

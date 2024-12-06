@@ -1,0 +1,13 @@
+*.tex   diff=tex
+*.bib   diff=bibtex
+*.m     diff=matlab
+
+*.r     diff=rstats
+*.texi* diff=texinfo
+*.org   diff=orgmode
+
+*.pdf   diff=pdf
+*.png   diff=exif
+*.jpg   diff=exif
+*.jpeg  diff=exif
+*.gif   diff=exif

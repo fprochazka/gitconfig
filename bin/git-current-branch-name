@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if ! [ -d .git ]; then
+    echo "Not a git repository";
+    exit 1;
+fi
+
+## thx https://stackoverflow.com/a/59115583/602899
+for location in rebase-merge rebase-apply; do
+    path=$(git rev-parse --git-path ${location})
+    if test -d ${path}; then
+        revision=$(<${path}/head-name)
+        echo ${revision##refs/heads/}
+        exit 0
+    fi
+done
+
+git rev-parse --abbrev-ref HEAD

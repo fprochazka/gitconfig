@@ -1,0 +1,54 @@
+[alias]
+	k = !gitk
+	cola = !git-cola
+
+	start = !git init && git commit --allow-empty -m "Initial commit"
+
+	# prints the history of current branch without pager
+	# it is useful when you wanna "save" the output for later in your terminal
+	h = !git --no-pager log --abbrev-commit --pretty=oneline "$(git get-main-upstream-branch)..$(git get-current-branch)"
+
+	# WIP & UNWIP replace stashing over draft branches
+	wip = !git add --all && git commit -m 'WIP [ci skip]'
+	unwip = reset HEAD~1
+
+	# commit as fixup to the latest non-fixup commit
+	cif = !git commit --fixup=$(git log-vgrep-most-recent-commit 'fixup!')
+	# commit as fixup, but interactive
+	cifi = !git commit-fixup-ask
+
+	slurp = !git restore --source=HEAD^ --staged . && git commit --amend --allow-empty --no-edit
+
+	# checkout master with cleanup
+	com = !git co "$(git get-main-branch)" && git pull && git cleanup
+
+	# drop branches that were merged into remote or were removed from remote
+	cleanup = !git fetch --all --prune && git branches-merged-drop && git branches-gone-drop
+
+	find = !sh -c 'git ls-tree -r --name-only HEAD | grep --color $1' -
+	cf = show --pretty="format:" --name-only
+
+	up = "!git stash && git fetch && git pull @{u}"
+	pu = !git up && git push @{u} "$(git get-main-branch)"
+
+	permission-reset = "!git diff -p | grep -E '^(diff|old mode|new mode)' | sed -e 's/^old/NEW/;s/^new/old/;s/^NEW/new/' | git apply"
+
+	# list cleanly merged local branches
+	# filter out current branch and master, as we never want to delete them
+	branches-merged-list = !git branch --merged "$(git get-main-branch)" | grep -E -i -v '^\\s*(\\*|master|main|develop)'
+	branches-merged-drop = !echo "Removing cleanly merged branches." && git branches-merged-list | xargs -n 1 -r git branch -d
+
+	# list local branches
+	# filter out current branch and master, as we never want to delete them
+	# filter the lines to the 'gone' keyword at a specific place of the output
+	# cut only the first column (branch name)
+	branches-gone-list = !git branch -vv | grep -E -i -v '^\\s*(\\*|master|main|develop)' |grep ' gone] ' | awk '{ print $1 }'
+	branches-gone-drop = !echo "Removing gone branches." && git branches-gone-list | xargs -n 1 -r git branch -D
+
+	# tries to detect main branch of this repo - if 'master' exists its master, otherwise main
+	get-main-branch = !git show-ref --quiet refs/heads/master && echo "master" || echo "main"
+	get-main-upstream-branch = !git show-ref --quiet "refs/heads/upstream/$(git get-main-branch)" && echo "upstream/$(git get-main-branch)" || echo "origin/$(git get-main-branch)"
+
+	get-current-branch = !~/.config/gitconfig/bin/git-current-branch-name
+	commit-fixup-ask = !~/.config/gitconfig/bin/git-commit-fixup-ask
+	log-vgrep-most-recent-commit = !~/.config/gitconfig/bin/git-log-vgrep-most-recent-commit

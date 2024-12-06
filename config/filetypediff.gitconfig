@@ -1,0 +1,15 @@
+[diff "rstats"]
+	xfuncname = "^([a-zA-z.]+ <- function.*)$"
+[diff "texinfo"]
+	# from http://git.savannah.gnu.org/gitweb/?p=coreutils.git;a=blob;f=.gitattributes;h=c3b2926c78c939d94358cc63d051a70d38cfea5d;hb=HEAD
+	xfuncname = "^@node[ \t][ \t]*\\([^,][^,]*\\)"
+[diff "orgmode"]
+	xfuncname = "^(\\*+.*)$"
+[diff "exif"]
+	binary = true
+	# sudo apt-get install libimage-exiftool-perl
+	textconv = exiftool
+[diff "phpf"]
+	xfuncname = "^[\t ]*(((public|protected|private|static)[\t ]+)*function.*)$\n"
+[diff "pdf"]
+	binary = true

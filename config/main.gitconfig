@@ -1,0 +1,77 @@
+[include]
+    path = ~/.config/gitconfig/config/commands.gitconfig
+[include]
+    path = ~/.config/gitconfig/config/aliases.gitconfig
+[include]
+    path = ~/.config/gitconfig/config/diffhighlight.gitconfig
+[include]
+    path = ~/.config/gitconfig/config/rebaseworkflow.gitconfig
+[include]
+    path = ~/.config/gitconfig/config/filetypediff.gitconfig
+[include]
+    path = ~/.config/gitconfig/config/colors.gitconfig
+
+[core]
+	excludesfile = ~/.config/gitconfig/config/main.gitignore
+	attributesfile = ~/.config/gitconfig/config/main.gitattributes
+
+	whitespace = fix,-indent-with-non-tab,space-before-tab,trailing-space,cr-at-eol
+	autocrlf = input
+	filemode = false
+	# editor = subl -n -w
+	editor = nano
+	pager = less
+
+[pager]
+	branch = false
+
+[commit]
+	gpgsign = true
+
+[diff]
+    algorithm = histogram
+	mnemonicprefix = true
+	renames = copies
+	# indentHeuristic = true # default from 2.18m
+	compactionHeuristic = true
+	# https://git-scm.com/docs/git-diff#Documentation/git-diff.txt-diffrenameLimit
+	renameLimit = 0 # unlimited
+	noprefix = true
+	context = 5
+
+[difftool]
+    # Run the tool immediately, don't ask 'are you sure' each time.
+    prompt = false
+
+[fetch]
+	prune = true
+
+[status]
+	showStash = true
+	# renames = defaults to diff.renames
+	# renameLimit = defaults to diff.renameLimit
+
+[advice]
+	statusHints = false
+	pushNonFastForward = false
+	skippedCherryPicks = false
+
+[pack]
+	writeReverseIndex = true
+
+[credential]
+	helper = store
+
+[help]
+	autoCorrect = prompt
+
+[gui]
+	diffcontext = 8
+
+[log]
+	decorate = true
+	date = iso
+
+[cola]
+	spellcheck = false
+	tabwidth = 4

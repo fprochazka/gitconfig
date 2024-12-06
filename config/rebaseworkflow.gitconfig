@@ -1,0 +1,27 @@
+[branch]
+    autosetuprebase = always
+
+[push]
+    default = current
+    autoSetupRemote = true
+
+[pull]
+    rebase = true
+
+[fetch]
+    prune = true
+
+[remote]
+    pushdefault = origin
+
+[rebase]
+    missingCommitsCheck = warn
+    abbreviateCommands = true
+    autosquash = true
+    # https://github.blog/2022-10-03-highlights-from-git-2-38/#rebase-dependent-branches-with-update-refs
+    updateRefs = true
+
+[merge]
+    ff = false
+    # renames = defaults to diff.renames
+    # renameLimit = defaults to diff.renameLimit
