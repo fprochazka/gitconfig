@@ -1,3 +1,6 @@
+[diff "lisp"]
+	xfuncname = "^(\\(.*)$"
+#	xfuncname = "^(\\((cl-)?def(un|macro|method).*)$"
 [diff "rstats"]
 	xfuncname = "^([a-zA-z.]+ <- function.*)$"
 [diff "texinfo"]
@@ -5,6 +8,11 @@
 	xfuncname = "^@node[ \t][ \t]*\\([^,][^,]*\\)"
 [diff "orgmode"]
 	xfuncname = "^(\\*+.*)$"
+#[diff "css"]
+#	xfuncname = "^([a-zA-Z#.@][^\\}]*)$"
+#	xfuncname = "^(.*\\{)$"
+[diff "rust"] # Thanks to csabahenk
+	xfuncname = "^[ \t]*(pub|)[ \t]*((fn|struct|enum|impl|trait|mod)[^;]*)$"
 [diff "exif"]
 	binary = true
 	# sudo apt-get install libimage-exiftool-perl
