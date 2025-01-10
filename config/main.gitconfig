@@ -63,9 +63,12 @@
 	helper = store
 
 [help]
+	# Automatically correct mistyped Git commands by asking for confirmation ('prompt').
 	autoCorrect = prompt
 
 [gui]
+	# Specifies the number of context lines around changed lines when viewing diffs in GUI tools.
+	# Default context lines provide sufficient detail for reviewing changes.
 	diffcontext = 8
 
 [log]

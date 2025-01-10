@@ -1,3 +1,9 @@
+# `diff-highlight` improves the readability of Git diffs by providing intra-line highlighting,
+# which emphasizes the precise portions of a line that were added, removed, or modified, rather than marking the entire line.
+# This makes it easier to spot changes, especially in lines with minor edits.
+# It is particularly useful for reviewing, debugging, or staging specific changes quickly
+# when working with commands like `git diff`, `git log`, and interactive workflows (e.g., `git add -p`).
+
 [pager]
 	log = diff-highlight | less
 	show = diff-highlight | less
