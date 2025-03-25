@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Function to traverse directories and find `.git` folders
+traverse() {
+    local dir="$1"
+    # Loop through files and directories in the current directory
+    for entry in "$dir"/*; do
+        # If `.git/` is found
+        if [[ -d "$entry/.git" ]]; then
+            echo
+            echo -e "\033[1mFound git repository:\033[0m $entry"
+            # Change to the git repository
+            cd "$entry" || continue
+
+            # Perform git fetch
+            echo "Running 'git fetch --all' in $entry"
+            git fetch --all
+
+            # Check if working directory is clean and branch is 'master' or 'main'
+            if git diff --quiet && git diff --cached --quiet && [[ "$(git rev-parse --abbrev-ref HEAD)" =~ ^(master|main)$ ]]; then
+                echo "Working tree clean and branch is 'master' or 'main'. Running 'git pull' in $entry"
+                git pull
+            else
+                echo -e "\033[31mSkipping 'git pull' in $entry (unsaved changes or branch is not 'master/main')\033[0m"
+            fi
+
+            # Go back to the previous directory
+            cd - > /dev/null || continue
+        # If entry is a directory, recurse into it (skipping `.git` repositories)
+        elif [[ -d "$entry" ]]; then
+            traverse "$entry"
+        fi
+    done
+}
+
+# Starting directory for traversal, default to current directory
+start_dir="${1:-.}"
+traverse "$start_dir"
