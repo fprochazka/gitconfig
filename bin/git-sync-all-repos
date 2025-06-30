@@ -20,8 +20,13 @@ traverse() {
 
             # Check if working directory is clean and branch is 'master' or 'main'
             if git diff --quiet && git diff --cached --quiet && [[ "$(git rev-parse --abbrev-ref HEAD)" =~ ^(master|main)$ ]]; then
-                echo "Working tree clean and branch is 'master' or 'main'. Running 'git pull' in $entry"
-                git pull
+                # Check if the current branch has a tracking branch configured
+                if git rev-parse --abbrev-ref @{u} >/dev/null 2>&1; then
+                    echo "Working tree clean and branch is 'master' or 'main'. Running 'git pull' in $entry"
+                    git pull
+                else
+                    echo -e "\033[31mSkipping 'git pull' in $entry (no tracking branch configured)\033[0m"
+                fi
             else
                 echo -e "\033[31mSkipping 'git pull' in $entry (unsaved changes or branch is not 'master/main')\033[0m"
             fi
