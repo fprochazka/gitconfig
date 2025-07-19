@@ -53,3 +53,4 @@
 	commit-fixup-ask = !~/.config/gitconfig/bin/git-commit-fixup-ask
 	log-vgrep-most-recent-commit = !~/.config/gitconfig/bin/git-log-vgrep-most-recent-commit
 	sync-all-repos = !~/.config/gitconfig/bin/git-sync-all-repos
+	gitlab-clone-all = !~/.config/gitconfig/bin/git-gitlab-clone-all
