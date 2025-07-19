@@ -2,44 +2,76 @@
 
 set -euo pipefail
 
-# Function to traverse directories and find `.git` folders
-traverse() {
+# Maximum number of parallel jobs
+MAX_JOBS=10
+
+# Function to find all git repositories
+find_repos() {
     local dir="$1"
-    # Loop through files and directories in the current directory
-    for entry in "$dir"/*; do
-        # If `.git/` is found
-        if [[ -d "$entry/.git" ]]; then
-            echo
-            echo -e "\033[1mFound git repository:\033[0m $entry"
-            # Change to the git repository
-            cd "$entry" || continue
-
-            # Perform git fetch
-            echo "Running 'git fetch --all' in $entry"
-            git fetch --all
-
-            # Check if working directory is clean and branch is 'master' or 'main'
-            if git diff --quiet && git diff --cached --quiet && [[ "$(git rev-parse --abbrev-ref HEAD)" =~ ^(master|main)$ ]]; then
-                # Check if the current branch has a tracking branch configured
-                if git rev-parse --abbrev-ref @{u} >/dev/null 2>&1; then
-                    echo "Working tree clean and branch is 'master' or 'main'. Running 'git pull' in $entry"
-                    git pull
-                else
-                    echo -e "\033[31mSkipping 'git pull' in $entry (no tracking branch configured)\033[0m"
-                fi
-            else
-                echo -e "\033[31mSkipping 'git pull' in $entry (unsaved changes or branch is not 'master/main')\033[0m"
-            fi
-
-            # Go back to the previous directory
-            cd - > /dev/null || continue
-        # If entry is a directory, recurse into it (skipping `.git` repositories)
-        elif [[ -d "$entry" ]]; then
-            traverse "$entry"
-        fi
+    find "$dir" -name ".git" -type d | while read -r git_dir; do
+        echo "${git_dir%/.git}"
     done
 }
 
-# Starting directory for traversal, default to current directory
+# Function to process a single git repository
+process_repo() {
+    local repo_path="$1"
+    local temp_file
+    temp_file=$(mktemp)
+
+    {
+        echo
+        echo -e "\033[1mFound git repository:\033[0m $repo_path"
+
+        echo "Running 'git fetch --all' in $repo_path"
+        if ! git -C "$repo_path" fetch --all 2>&1; then
+            echo -e "\033[31mFailed to fetch in $repo_path\033[0m"
+            exit 1
+        fi
+
+        # Check if repository has commits (HEAD exists)
+        if ! current_branch=$(git -C "$repo_path" rev-parse --abbrev-ref HEAD 2>/dev/null); then
+            echo -e "\033[31mSkipping 'git pull' in $repo_path (empty repository or no HEAD)\033[0m"
+        elif git -C "$repo_path" diff --quiet 2>/dev/null && git -C "$repo_path" diff --cached --quiet 2>/dev/null && [[ "$current_branch" =~ ^(master|main)$ ]]; then
+            if git -C "$repo_path" rev-parse --abbrev-ref @{u} >/dev/null 2>&1; then
+                echo "Working tree clean and branch is 'master' or 'main'. Running 'git pull' in $repo_path"
+                if ! git -C "$repo_path" pull 2>&1; then
+                    echo -e "\033[31mFailed to pull in $repo_path\033[0m"
+                    exit 1
+                fi
+            else
+                echo -e "\033[31mSkipping 'git pull' in $repo_path (no tracking branch configured)\033[0m"
+            fi
+        else
+            echo -e "\033[31mSkipping 'git pull' in $repo_path (unsaved changes or branch is not 'master/main')\033[0m"
+        fi
+    } > "$temp_file" 2>&1
+
+    # Output the complete result atomically
+    cat "$temp_file"
+    rm -f "$temp_file"
+}
+
+# Export the function so it can be used by xargs
+export -f process_repo
+
+# Main execution
+echo "Scanning for git repositories..."
 start_dir="${1:-.}"
-traverse "$start_dir"
+
+# Find all repositories and process them in parallel
+if ! repo_list=$(find_repos "$start_dir"); then
+    echo "Failed to scan for repositories"
+    exit 1
+fi
+
+if [[ -z "$repo_list" ]]; then
+    echo "No git repositories found in $start_dir"
+    exit 0
+fi
+
+repo_count=$(echo "$repo_list" | wc -l)
+echo "Found $repo_count git repositories. Processing with concurrency=$MAX_JOBS..."
+
+# Use printf to avoid issues with trailing newlines, then xargs with parallel processing
+printf '%s\n' "$repo_list" | xargs -I {} -P "$MAX_JOBS" bash -c 'process_repo "$@"' _ {}
