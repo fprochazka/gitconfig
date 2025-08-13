@@ -1,48 +1,60 @@
 [pretty]
-#	custom-log-oneline = "format:%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset %C(magenta)(%G?: %GS)%Creset"
+	# colorized oneline format with hash, refs, message, relative date and author
 	custom-log-oneline = "format:%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset"
 
 [alias]
+	# basic command shortcuts
 	co = checkout
 	cp = cherry-pick
 	st = status
-	ap = add -p
+	ap = add -p                # interactive staging
 	ci = commit
-	qci = commit
+	qci = commit               # quick commit (duplicate for muscle memory)
 	cia = commit --amend
 
+	# rebase operations
 	rb = rebase
-	rbm = !git rbi "$(git get-main-branch)"
-	rbmi = !git rbim
-	rbi = rebase -i
-	rbim = !git rbi "$(git get-main-branch)"
+	rbm = !git rbi "$(git get-main-branch)"       # rebase interactive against main branch
+	rbmi = !git rbim                              # alias for rbim
+	rbi = rebase -i                               # interactive rebase
+	rbim = !git rbi "$(git get-main-branch)"      # rebase interactive against main branch
 	rba = rebase --abort
 	rbc = rebase --continue
 	rbs = rebase --skip
 
+	# branch listing with verbose info, sorted by commit date
 	br = branch -vv --sort=-committerdate
 	b = branch -vv --sort=-committerdate
 
+	# diff shortcuts
 	d = diff
-	dc = diff --cached
-	dw = diff --word-diff
+	dc = diff --cached         # diff staged changes
+	dw = diff --word-diff      # word-level diff highlighting
 
-	mb = merge --no-ff
-	ff = merge --ff-only
+	# merge operations
+	mb = merge --no-ff         # merge with merge commit
+	ff = merge --ff-only       # fast-forward only merge
 
+	# staging operations
 	stage = add
 	unstage = reset HEAD --
 
+	# remote operations
 	f = fetch --all --prune
 	fpush = push --force-with-lease
 
+	# log variations with custom formatting
 	l =  log --graph --pretty=custom-log-oneline --abbrev-commit --date=relative
-	ls = "l --stat -m"
-	lp = "l -p"
-	lw = "l -p --color-words"
+	ls = "l --stat -m"         # log with file change stats
+	lp = "l -p"                # log with patches
+	lps = "l -p --stat -m"     # log with patches
+	lsp = !git lps
+	lw = "l -p --color-words"  # log with word-diff patches
 
+	# branch-specific logs
 	lb = !git l $(git get-current-branch)
 	logb = !git log $(git get-current-branch)
 
-	assume-unchanged = "update-index --assume-unchanged"
-	assume-changed = "update-index --no-assume-unchanged"
+	# file tracking control
+	assume-unchanged = "update-index --assume-unchanged"      # ignore local changes to tracked file
+	assume-changed = "update-index --no-assume-unchanged"     # resume tracking changes to file
