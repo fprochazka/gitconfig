@@ -15,56 +15,55 @@
 	excludesfile = ~/.config/gitconfig/config/main.gitignore
 	attributesfile = ~/.config/gitconfig/config/main.gitattributes
 
-	whitespace = fix,-indent-with-non-tab,space-before-tab,trailing-space,cr-at-eol
-	autocrlf = input
-	filemode = false
+	whitespace = fix,-indent-with-non-tab,space-before-tab,trailing-space,cr-at-eol  # whitespace error detection
+	autocrlf = input              # convert CRLF to LF on commit, keep LF on checkout
+	filemode = false              # ignore file permission changes (useful on Windows/WSL)
 	# editor = subl -n -w
-	editor = nano
-	pager = less
+	editor = nano                 # default text editor for commit messages
+	pager = less                  # pager for git output
 
 [pager]
-	branch = false
+	branch = false                # disable pager for git branch command
 
 [commit]
-	gpgsign = true
+	gpgsign = true                # sign commits with GPG by default
 
 [diff]
-    algorithm = histogram
-	mnemonicprefix = true
-	renames = copies
-	# indentHeuristic = true # default from 2.18m
-	compactionHeuristic = true
+	algorithm = histogram         # use histogram diff algorithm (faster and better)
+	mnemonicprefix = true         # use descriptive prefixes (i/index, w/worktree, c/commit, o/object)
+	renames = copies              # detect renames and copies in diffs
+	# indentHeuristic = true      # default from 2.18m - better hunk boundaries
+	compactionHeuristic = true    # make diffs more readable by choosing better hunk boundaries
 	# https://git-scm.com/docs/git-diff#Documentation/git-diff.txt-diffrenameLimit
-	renameLimit = 0 # unlimited
-	noprefix = true
-	context = 5
+	renameLimit = 0               # unlimited rename detection (0 = no limit)
+	noprefix = true               # don't show a/ and b/ prefixes in diff output
+	context = 8                   # lines of context around changes to show
 
 [difftool]
-    # Run the tool immediately, don't ask 'are you sure' each time.
-    prompt = false
+	prompt = false                # Run the tool immediately, don't ask 'are you sure' each time.
 
 [fetch]
-	prune = true
+	prune = true                  # automatically prune remote-tracking branches
 
 [status]
-	showStash = true
+	showStash = true              # show stash count in git status
 	# renames = defaults to diff.renames
 	# renameLimit = defaults to diff.renameLimit
 
 [advice]
-	statusHints = false
-	pushNonFastForward = false
-	skippedCherryPicks = false
+	# Disable verbose advice messages
+	statusHints = false           # don't show hints in git status
+	pushNonFastForward = false    # don't show advice when push is rejected
+	skippedCherryPicks = false    # don't show advice about skipped cherry-picks
 
 [pack]
-	writeReverseIndex = true
+	writeReverseIndex = true      # Pack file optimization: write reverse index files for better performance
 
 [credential]
-	helper = store
+	helper = store                # store credentials in plaintext file
 
 [help]
-	# Automatically correct mistyped Git commands by asking for confirmation ('prompt').
-	autoCorrect = prompt
+	autoCorrect = prompt          # Automatically correct mistyped Git commands by asking for confirmation ('prompt').
 
 [gui]
 	# Specifies the number of context lines around changed lines when viewing diffs in GUI tools.
@@ -72,9 +71,10 @@
 	diffcontext = 8
 
 [log]
-	decorate = true
-	date = iso
+	decorate = true               # show branch and tag names in git log
+	date = iso                    # use ISO date format in logs
 
 [cola]
-	spellcheck = false
-	tabwidth = 4
+	# Git Cola GUI settings
+	spellcheck = false            # disable spellcheck in commit messages
+	tabwidth = 4                  # tab width for display

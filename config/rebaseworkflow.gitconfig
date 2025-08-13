@@ -1,27 +1,28 @@
 [branch]
-    autosetuprebase = always
+    autosetuprebase = always        # automatically set up new branches to rebase instead of merge
 
 [push]
-    default = current
-    autoSetupRemote = true
+    default = current               # push current branch to branch with same name on remote
+    autoSetupRemote = true          # automatically set up remote tracking when pushing new branches
 
 [pull]
-    rebase = true
+    rebase = true                   # use rebase instead of merge when pulling changes
 
 [fetch]
-    prune = true
+    prune = true                    # automatically remove remote-tracking branches that no longer exist
 
 [remote]
-    pushdefault = origin
+    pushdefault = origin            # use 'origin' as default remote for pushes
 
 [rebase]
-    missingCommitsCheck = warn
-    abbreviateCommands = true
-    autosquash = true
+    # Interactive rebase behavior and safety features
+    missingCommitsCheck = warn      # warn about commits that might be dropped during rebase
+    abbreviateCommands = true       # use abbreviated commands in rebase todo list (p, r, e, etc.)
+    autosquash = true               # automatically arrange fixup!/squash! commits in interactive rebase
     # https://github.blog/2022-10-03-highlights-from-git-2-38/#rebase-dependent-branches-with-update-refs
-    updateRefs = true
+    updateRefs = true               # automatically update dependent branches during rebase (stacked branches)
 
 [merge]
-    ff = false
+    ff = false                      # always create merge commit, even for fast-forward merges
     # renames = defaults to diff.renames
     # renameLimit = defaults to diff.renameLimit
