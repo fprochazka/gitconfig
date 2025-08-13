@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Function to show usage
+usage() {
+    echo "Usage: git branches-stacked-list [--with-remotes]"
+    echo ""
+    echo "Lists all local branches that contain commits from the current branch."
+    echo "By default, only shows branches with tracking remotes."
+    echo ""
+    echo "Options:"
+    echo "  --with-remotes    Include remote tracking information in output"
+    echo "  --all            Show all branches, even without tracking remotes"
+    echo "  -h, --help       Show this help message"
+    exit 1
+}
+
+# Parse arguments
+show_remotes=false
+show_all=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --with-remotes)
+            show_remotes=true
+            shift
+            ;;
+        --all)
+            show_all=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage
+            ;;
+    esac
+done
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not in a git repository" >&2
+    exit 1
+fi
+
+# Get the current branch and main branch
+current_branch=$(git get-current-branch)
+main_branch=$(git get-main-branch)
+
+# Get all commits in current branch that aren't in main branch
+commits_in_branch=$(git rev-list "$main_branch..$current_branch" 2>/dev/null || true)
+
+if [[ -z "$commits_in_branch" ]]; then
+    exit 0
+fi
+
+# Find all branches that contain any of these commits
+branches_found=()
+for commit in $commits_in_branch; do
+    # Get branches that contain this commit, excluding remote branches
+    commit_branches=$(git branch --contains "$commit" 2>/dev/null | grep -v '^\s*remotes/' | sed 's/^\s*\*//' | sed 's/^\s*//' || true)
+    
+    for branch in $commit_branches; do
+        # Skip if branch is already in our list
+        if [[ ! " ${branches_found[@]:-} " =~ " $branch " ]]; then
+            # If --all is specified, include all branches
+            if [[ "$show_all" == "true" ]]; then
+                branches_found+=("$branch")
+            else
+                # Otherwise, only include branches with tracking remotes
+                if git config "branch.$branch.remote" >/dev/null 2>&1; then
+                    branches_found+=("$branch")
+                fi
+            fi
+        fi
+    done
+done
+
+# Sort and deduplicate
+if [[ ${#branches_found[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+# Sort branches
+IFS=$'\n' branches_found=($(printf '%s\n' "${branches_found[@]}" | sort -u))
+
+# Output branches
+for branch in "${branches_found[@]}"; do
+    if [[ "$show_remotes" == "true" ]]; then
+        if git config "branch.$branch.remote" >/dev/null 2>&1; then
+            remote=$(git config "branch.$branch.remote")
+            remote_branch=$(git config "branch.$branch.merge" | sed 's|refs/heads/||')
+            echo "$branch -> $remote/$remote_branch"
+        else
+            echo "$branch (no tracking remote)"
+        fi
+    else
+        echo "$branch"
+    fi
+done

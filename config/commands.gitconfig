@@ -54,3 +54,7 @@
 	log-vgrep-most-recent-commit = !~/.config/gitconfig/bin/git-log-vgrep-most-recent-commit
 	sync-all-repos = !~/.config/gitconfig/bin/git-sync-all-repos
 	gitlab-clone-all = !~/.config/gitconfig/bin/git-gitlab-clone-all
+
+	# commands for simpler manipulation of stacked branches (i.e. when branch is based on branch based on branch on main)
+	branches-stacked-list = !~/.config/gitconfig/bin/git-branches-stacked-list
+	fpush-stack = !~/.config/gitconfig/bin/git-fpush-stack
