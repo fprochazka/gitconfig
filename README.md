@@ -36,10 +36,6 @@ Include configs using a `~/.gitconfig`
 
 This gitconfig provides many custom git commands and aliases for enhanced productivity:
 
-### Quick Access Commands
-- **`git k`** - Launch gitk GUI
-- **`git cola`** - Launch git-cola GUI
-
 ### Project Initialization
 - **`git start`** - Initialize repository with an initial empty commit
 
@@ -82,3 +78,7 @@ This gitconfig provides many custom git commands and aliases for enhanced produc
 ### Repository Management
 - **`git sync-all-repos [dir]`** - Recursively sync all git repositories in directory
 - **`git gitlab-clone-all`** - Clone all repositories from a GitLab group
+
+### Other aliases & shortcuts
+
+See [config/aliases.gitconfig](https://github.com/fprochazka/gitconfig/blob/master/config/aliases.gitconfig)
