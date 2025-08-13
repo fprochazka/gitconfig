@@ -2,9 +2,36 @@
 
 set -euo pipefail
 
+# Function to show usage
+usage() {
+    echo "Usage: git current-branch-name"
+    echo ""
+    echo "Get the current branch name, even during an ongoing rebase."
+    echo "This command works correctly in situations where 'git branch' shows"
+    echo "a detached HEAD state during interactive rebases."
+    echo ""
+    echo "Returns:"
+    echo "  - During rebase: the original branch name being rebased"
+    echo "  - Normal state: the current branch name"
+    echo ""
+    echo "Examples:"
+    echo "  git current-branch-name"
+    echo "  branch=\$(git current-branch-name)"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help    Show this help message"
+    exit 1
+}
+
+# Handle help flag
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+    usage
+fi
+
+# Check if we're in a git repository
 if ! [ -d .git ]; then
-    echo "Not a git repository";
-    exit 1;
+    echo "Error: Not a git repository" >&2
+    exit 1
 fi
 
 ## thx https://stackoverflow.com/a/59115583/602899

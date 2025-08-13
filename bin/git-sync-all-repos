@@ -2,6 +2,41 @@
 
 set -euo pipefail
 
+# Function to show usage
+usage() {
+    echo "Usage: git sync-all-repos [DIRECTORY]"
+    echo ""
+    echo "Recursively find all git repositories and sync them with their remotes."
+    echo "For each repository, this command will:"
+    echo "  1. Run 'git fetch --all' to update remote refs"
+    echo "  2. Run 'git pull' if the working tree is clean and on main/master branch"
+    echo ""
+    echo "The script processes repositories in parallel for better performance."
+    echo ""
+    echo "Arguments:"
+    echo "  DIRECTORY    Directory to scan for git repositories (default: current directory)"
+    echo ""
+    echo "Behavior:"
+    echo "  - Skips repositories with uncommitted changes"
+    echo "  - Only pulls on main/master branches with tracking remotes"
+    echo "  - Processes up to 10 repositories concurrently"
+    echo "  - Shows colored output to distinguish success/failure"
+    echo ""
+    echo "Examples:"
+    echo "  git sync-all-repos"
+    echo "  git sync-all-repos ~/projects"
+    echo "  git sync-all-repos /path/to/workspace"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help    Show this help message"
+    exit 1
+}
+
+# Handle help flag
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+    usage
+fi
+
 # Maximum number of parallel jobs
 MAX_JOBS=10
 

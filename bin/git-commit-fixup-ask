@@ -1,8 +1,38 @@
 #!/usr/bin/env bash
 
+set -euo pipefail
+
+# Function to show usage
+usage() {
+    echo "Usage: git commit-fixup-ask"
+    echo ""
+    echo "Interactively create a fixup commit for staged changes."
+    echo "Shows commits in the current branch and lets you pick which one to fixup."
+    echo "Only works when you have staged changes ready to commit."
+    echo ""
+    echo "The command will:"
+    echo "  1. Show all commits in current branch (excluding fixup/squash commits)"
+    echo "  2. Show which staged files would be affected"
+    echo "  3. Let you choose which commit to create a fixup for"
+    echo ""
+    echo "Examples:"
+    echo "  git add file.txt"
+    echo "  git commit-fixup-ask"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help    Show this help message"
+    exit 1
+}
+
+# Handle help flag
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+    usage
+fi
+
+# Check if we're in a git repository
 if ! [ -d .git ]; then
-    echo "Not a git repository";
-    exit 1;
+    echo "Error: Not a git repository" >&2
+    exit 1
 fi
 
 if git diff --cached --quiet --exit-code; then

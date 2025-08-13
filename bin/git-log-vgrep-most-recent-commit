@@ -1,7 +1,32 @@
-#! /bin/bash
-if (( $# < 1 )); then
-  echo >&2 "Usage: $0 pattern [<since>..<until>]"
-  exit 1
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Function to show usage
+usage() {
+    echo "Usage: git log-vgrep-most-recent-commit PATTERN [<since>..<until>]"
+    echo ""
+    echo "Find the most recent commit that does NOT match the given pattern."
+    echo "Useful for finding the last non-trivial commit before a series of"
+    echo "fixup commits, merge commits, or commits matching a specific pattern."
+    echo ""
+    echo "Arguments:"
+    echo "  PATTERN           Grep pattern to exclude from results"
+    echo "  [<since>..<until>] Optional commit range (default: all history)"
+    echo ""
+    echo "Examples:"
+    echo "  git log-vgrep-most-recent-commit 'fixup!'"
+    echo "  git log-vgrep-most-recent-commit 'Merge' HEAD~10..HEAD"
+    echo "  git log-vgrep-most-recent-commit 'WIP' origin/main..HEAD"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help    Show this help message"
+    exit 1
+}
+
+# Handle help flag and validate arguments
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]] || (( $# < 1 )); then
+    usage
 fi
 pattern=$1
 shift
