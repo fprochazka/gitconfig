@@ -58,3 +58,6 @@
 	# commands for simpler manipulation of stacked branches (i.e. when branch is based on branch based on branch on main)
 	branches-stacked-list = !~/.config/gitconfig/bin/git-branches-stacked-list
 	fpush-stack = !~/.config/gitconfig/bin/git-fpush-stack
+
+	# track AI usage in commits
+	aiu = !~/.config/gitconfig/bin/git-aiu

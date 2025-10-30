@@ -53,6 +53,7 @@ This gitconfig provides many custom git commands and aliases for enhanced produc
 - **`git cif`** - Commit as fixup to the latest non-fixup commit
 - **`git cifi`** - Interactive fixup commit selection
 - **`git slurp`** - Move staged changes to previous commit (amend with unstaging)
+- **`git aiu`** - Track AI usage in commits by managing author and Co-authored-by metadata
 
 ### Branch Management & Cleanup
 - **`git com`** - Checkout main branch, pull, and also run `git cleanup`

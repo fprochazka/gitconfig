@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Function to show usage
+usage() {
+    echo "Usage: git aiu [--mode MODE] [--tool TOOL]"
+    echo ""
+    echo "Track AI usage in commits by managing author and Co-authored-by metadata."
+    echo "If options are not provided, the script will prompt interactively."
+    echo ""
+    echo "Options:"
+    echo "  --mode MODE   Specify the AI usage mode:"
+    echo "                  ai-authored  - AI wrote the code, human reviewed"
+    echo "                  ai-assisted  - Human wrote with AI assistance"
+    echo "                  organic      - No AI involvement"
+    echo ""
+    echo "  --tool TOOL   Specify the AI tool used:"
+    echo "                  cursor       - Cursor"
+    echo "                  copilot      - GitHub Copilot"
+    echo "                  factory      - Factory AI"
+    echo "                  devin        - Devin"
+    echo "                  jetbrains    - JetBrains AI"
+    echo "                  claude       - Claude"
+    echo ""
+    echo "  -h, --help    Show this help message"
+    echo ""
+    echo "Modes:"
+    echo "  ai-authored:  Sets the AI tool as commit author, adds user as Co-authored-by"
+    echo "  ai-assisted:  Sets user as commit author, adds AI tool as Co-authored-by"
+    echo "  organic:      Sets user as commit author, removes AI tool from Co-authored-by"
+    echo ""
+    echo "Examples:"
+    echo "  git aiu --mode ai-assisted --tool cursor"
+    echo "  git aiu"
+    exit 1
+}
+
+# Define tool emails
+declare -A TOOL_EMAILS=(
+    ["cursor"]="Cursor <cursor@cursor.sh>"
+    ["copilot"]="GitHub Copilot <copilot@github.com>"
+    ["factory"]="factory-droid[bot] <factory-droid[bot]@users.noreply.github.com>"
+    ["devin"]="Devin <devin@cognition-labs.com>"
+    ["jetbrains"]="JetBrains AI <ai@jetbrains.com>"
+    ["claude"]="Claude <noreply@anthropic.com>"
+)
+
+# Parse arguments
+MODE=""
+TOOL=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        --mode)
+            MODE="$2"
+            shift 2
+            ;;
+        --tool)
+            TOOL="$2"
+            shift 2
+            ;;
+        *)
+            echo "Error: Unknown option $1" >&2
+            usage
+            ;;
+    esac
+done
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not in a git repository" >&2
+    exit 1
+fi
+
+# Check if there's a commit to amend
+if ! git rev-parse HEAD >/dev/null 2>&1; then
+    echo "Error: No commits found. Cannot amend an empty repository." >&2
+    exit 1
+fi
+
+# Interactive mode selection if not provided
+if [[ -z "$MODE" ]]; then
+    echo "Select AI usage mode:"
+    echo "1. ai-authored  - AI wrote the code, human reviewed"
+    echo "2. ai-assisted  - Human wrote with AI assistance"
+    echo "3. organic      - No AI involvement"
+    echo ""
+    read -p "Pick a mode [1..3]: " mode_choice
+
+    case "$mode_choice" in
+        1) MODE="ai-authored" ;;
+        2) MODE="ai-assisted" ;;
+        3) MODE="organic" ;;
+        *)
+            echo "Error: Invalid choice. Expected 1, 2, or 3." >&2
+            exit 1
+            ;;
+    esac
+fi
+
+# Validate mode
+if [[ "$MODE" != "ai-authored" && "$MODE" != "ai-assisted" && "$MODE" != "organic" ]]; then
+    echo "Error: Invalid mode '$MODE'. Must be ai-authored, ai-assisted, or organic." >&2
+    exit 1
+fi
+
+# Interactive tool selection if not provided (skip for organic mode)
+if [[ -z "$TOOL" && "$MODE" != "organic" ]]; then
+    echo ""
+    echo "Select AI tool:"
+    echo "1. cursor       - Cursor"
+    echo "2. copilot      - GitHub Copilot"
+    echo "3. factory      - Factory AI"
+    echo "4. devin        - Devin"
+    echo "5. jetbrains    - JetBrains AI"
+    echo "6. claude       - Claude"
+    echo ""
+    read -p "Pick a tool [1..6]: " tool_choice
+
+    case "$tool_choice" in
+        1) TOOL="cursor" ;;
+        2) TOOL="copilot" ;;
+        3) TOOL="factory" ;;
+        4) TOOL="devin" ;;
+        5) TOOL="jetbrains" ;;
+        6) TOOL="claude" ;;
+        *)
+            echo "Error: Invalid choice. Expected 1-6." >&2
+            exit 1
+            ;;
+    esac
+fi
+
+# Validate tool (if not organic mode)
+if [[ "$MODE" != "organic" ]]; then
+    if [[ -z "${TOOL_EMAILS[$TOOL]:-}" ]]; then
+        echo "Error: Invalid tool '$TOOL'. Must be one of: cursor, copilot, factory, devin, jetbrains, claude." >&2
+        exit 1
+    fi
+fi
+
+# Get user's configured name and email
+USER_NAME=$(git config user.name)
+USER_EMAIL=$(git config user.email)
+
+if [[ -z "$USER_NAME" || -z "$USER_EMAIL" ]]; then
+    echo "Error: Git user.name and user.email must be configured." >&2
+    exit 1
+fi
+
+USER_AUTHOR="$USER_NAME <$USER_EMAIL>"
+
+# Get current commit message
+COMMIT_MSG=$(git log -1 --format=%B)
+
+# Function to check if a line is a known AI tool Co-authored-by line
+is_ai_coauthor_line() {
+    local line="$1"
+    for tool_email in "${TOOL_EMAILS[@]}"; do
+        if [[ "$line" == "Co-authored-by: $tool_email" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Function to remove AI tool Co-authored-by lines from commit message
+remove_ai_coauthor() {
+    local msg="$1"
+    local result=""
+    local in_trailer=false
+
+    while IFS= read -r line; do
+        # Check if this is an AI Co-authored-by line
+        if is_ai_coauthor_line "$line"; then
+            # Skip this line
+            continue
+        fi
+
+        # Keep the line
+        if [[ -n "$result" ]]; then
+            result="$result"$'\n'
+        fi
+        result="$result$line"
+    done <<< "$msg"
+
+    # Remove trailing empty lines
+    echo "$result" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'
+}
+
+# Function to add or replace Co-authored-by line
+update_coauthor() {
+    local msg="$1"
+    local new_coauthor="$2"
+
+    # Remove existing AI Co-authored-by lines
+    msg=$(remove_ai_coauthor "$msg")
+
+    # If new_coauthor is empty, just return cleaned message
+    if [[ -z "$new_coauthor" ]]; then
+        echo "$msg"
+        return
+    fi
+
+    # Check if message already has any Co-authored-by lines (non-AI)
+    local has_coauthor=false
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^Co-authored-by: ]]; then
+            has_coauthor=true
+            break
+        fi
+    done <<< "$msg"
+
+    # Add new Co-authored-by line
+    # If there are existing Co-authored-by lines, add before them
+    # Otherwise, add at the end with a blank line before it
+    if [[ "$has_coauthor" == "true" ]]; then
+        # Add new AI Co-authored-by before existing ones
+        local result=""
+        local added=false
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^Co-authored-by: ]] && [[ "$added" == "false" ]]; then
+                result="$result$new_coauthor"$'\n'
+                added=true
+            fi
+            if [[ -n "$result" ]]; then
+                result="$result"$'\n'
+            fi
+            result="$result$line"
+        done <<< "$msg"
+        echo "$result"
+    else
+        # Add at the end with a blank line separator
+        echo "$msg"
+        echo ""
+        echo "$new_coauthor"
+    fi
+}
+
+# Process based on mode
+case "$MODE" in
+    ai-authored)
+        echo "Setting AI tool as author with user as Co-authored-by..."
+        TOOL_AUTHOR="${TOOL_EMAILS[$TOOL]}"
+        NEW_MSG=$(update_coauthor "$COMMIT_MSG" "Co-authored-by: $USER_AUTHOR")
+
+        # Amend commit with new author and message
+        git commit --amend --no-edit --author="$TOOL_AUTHOR" -m "$NEW_MSG"
+
+        echo "Done! Commit authored by: $TOOL_AUTHOR"
+        echo "Co-authored-by: $USER_AUTHOR"
+        ;;
+
+    ai-assisted)
+        echo "Setting user as author with AI tool as Co-authored-by..."
+        TOOL_AUTHOR="${TOOL_EMAILS[$TOOL]}"
+        NEW_MSG=$(update_coauthor "$COMMIT_MSG" "Co-authored-by: $TOOL_AUTHOR")
+
+        # Amend commit with user as author and AI as co-author
+        git commit --amend --no-edit --author="$USER_AUTHOR" -m "$NEW_MSG"
+
+        echo "Done! Commit authored by: $USER_AUTHOR"
+        echo "Co-authored-by: $TOOL_AUTHOR"
+        ;;
+
+    organic)
+        echo "Removing AI Co-authored-by and setting user as author..."
+        NEW_MSG=$(remove_ai_coauthor "$COMMIT_MSG")
+
+        # Amend commit with user as author and no AI co-author
+        git commit --amend --no-edit --author="$USER_AUTHOR" -m "$NEW_MSG"
+
+        echo "Done! Commit authored by: $USER_AUTHOR"
+        echo "AI Co-authored-by removed."
+        ;;
+esac
