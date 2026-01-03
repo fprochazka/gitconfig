@@ -1,0 +1,74 @@
+#!/bin/bash
+# Show MR/PR status for the current branch (works with both GitHub and GitLab)
+
+set -e
+
+# Get the current branch (only used for error messages and GitLab)
+current_branch=$(git branch --show-current)
+explicit_branch="$1"
+
+# Detect the remote provider
+provider=$(git remote-host-provider 2>/dev/null || echo "unknown")
+
+case "$provider" in
+    github)
+        # gh pr view without branch arg auto-detects fork PRs correctly
+        if [[ -n "$explicit_branch" ]]; then
+            json=$(gh pr view "$explicit_branch" --json url,title,body,state,statusCheckRollup 2>&1)
+        else
+            json=$(gh pr view --json url,title,body,state,statusCheckRollup 2>&1)
+        fi || {
+            echo "No pull request found for branch '${explicit_branch:-$current_branch}'"
+            exit 1
+        }
+
+        url=$(echo "$json" | jq -r '.url')
+        title=$(echo "$json" | jq -r '.title')
+        body=$(echo "$json" | jq -r '.body')
+        state=$(echo "$json" | jq -r '.state')
+        ci_status=$(echo "$json" | jq -r '(.statusCheckRollup // []) | map(.conclusion // .status) | unique | join(", ")' 2>/dev/null || echo "n/a")
+
+        echo "URL:    $url"
+        echo "Title:  $title"
+        echo "State:  $state"
+        echo "CI:     ${ci_status:-n/a}"
+        if [[ -n "$body" && "$body" != "null" ]]; then
+            echo ""
+            echo "Description:"
+            echo "$body"
+        fi
+        ;;
+
+    gitlab)
+        # glab mr view without branch arg also works for current branch
+        if [[ -n "$explicit_branch" ]]; then
+            json=$(glab mr view "$explicit_branch" -F json 2>&1)
+        else
+            json=$(glab mr view -F json 2>&1)
+        fi || {
+            echo "No merge request found for branch '${explicit_branch:-$current_branch}'"
+            exit 1
+        }
+
+        url=$(echo "$json" | jq -r '.web_url')
+        title=$(echo "$json" | jq -r '.title')
+        body=$(echo "$json" | jq -r '.description')
+        state=$(echo "$json" | jq -r '.state')
+        ci_status=$(echo "$json" | jq -r '.pipeline.status // "n/a"')
+
+        echo "URL:    $url"
+        echo "Title:  $title"
+        echo "State:  $state"
+        echo "CI:     $ci_status"
+        if [[ -n "$body" && "$body" != "null" && "$body" != "" ]]; then
+            echo ""
+            echo "Description:"
+            echo "$body"
+        fi
+        ;;
+
+    *)
+        echo "error: could not detect remote provider (github/gitlab)" >&2
+        exit 1
+        ;;
+esac
