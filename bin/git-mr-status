@@ -19,7 +19,7 @@ case "$provider" in
             json=$(gh pr view --json url,title,body,state,statusCheckRollup,headRefName,baseRefName,isCrossRepository,headRepositoryOwner 2>&1)
         fi || {
             echo "No pull request found for branch '${explicit_branch:-$current_branch}'"
-            exit 1
+            exit 0
         }
 
         url=$(echo "$json" | jq -r '.url')
@@ -61,7 +61,7 @@ case "$provider" in
             json=$(glab mr view -F json 2>&1)
         fi || {
             echo "No merge request found for branch '${explicit_branch:-$current_branch}'"
-            exit 1
+            exit 0
         }
 
         url=$(echo "$json" | jq -r '.web_url')
