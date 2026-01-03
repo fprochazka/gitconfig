@@ -1,0 +1,95 @@
+#!/bin/bash
+# Show if the origin remote is a fork and what the upstream/parent repo is
+
+set -e
+
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    echo "Usage: git upstream-info [--name-only]"
+    echo ""
+    echo "Show if the origin remote is a fork and what the upstream/parent repo is."
+    echo "Results are cached in .git/config for fast subsequent lookups."
+    echo ""
+    echo "Options:"
+    echo "  --name-only  Output only the repo name (parent if fork, self if not)"
+    echo "  --help, -h   Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  git upstream-info            # 'fork of owner/repo' or 'not a fork'"
+    echo "  git upstream-info --name-only # 'owner/repo'"
+    exit 0
+fi
+
+name_only=false
+if [[ "$1" == "--name-only" ]]; then
+    name_only=true
+fi
+
+config_key="remote.origin.fork-parent"
+cached=$(git config --get "$config_key" 2>/dev/null || true)
+
+if [[ -z "$cached" ]]; then
+    # Detect and cache
+    provider=$(git remote-host-provider 2>/dev/null || echo "unknown")
+    origin_url=$(git remote get-url origin 2>/dev/null || true)
+
+    case "$provider" in
+        github)
+            origin_repo=$(echo "$origin_url" | sed -E 's#.*github\.com[:/](.+)(\.git)?$#\1#' | sed 's/\.git$//')
+            json=$(gh repo view "$origin_repo" --json isFork,parent,nameWithOwner 2>&1) || {
+                echo "error: could not query GitHub repo '$origin_repo'" >&2
+                exit 1
+            }
+
+            is_fork=$(echo "$json" | jq -r '.isFork')
+            self_name=$(echo "$json" | jq -r '.nameWithOwner')
+            parent_name=$(echo "$json" | jq -r '.parent.owner.login + "/" + .parent.name // empty')
+
+            if [[ "$is_fork" == "true" && -n "$parent_name" ]]; then
+                git config "$config_key" "$parent_name"
+            else
+                git config "$config_key" "-"
+                git config "remote.origin.repo-name" "$self_name"
+            fi
+            ;;
+
+        gitlab)
+            json=$(glab repo view -F json 2>&1) || {
+                echo "error: could not query GitLab repo" >&2
+                exit 1
+            }
+
+            self_name=$(echo "$json" | jq -r '.path_with_namespace')
+            parent_name=$(echo "$json" | jq -r '.forked_from_project.path_with_namespace // empty')
+
+            if [[ -n "$parent_name" ]]; then
+                git config "$config_key" "$parent_name"
+            else
+                git config "$config_key" "-"
+                git config "remote.origin.repo-name" "$self_name"
+            fi
+            ;;
+
+        *)
+            echo "error: could not detect remote provider (github/gitlab)" >&2
+            exit 1
+            ;;
+    esac
+
+    cached=$(git config --get "$config_key")
+fi
+
+# Output result
+if [[ "$cached" == "-" ]]; then
+    self_name=$(git config --get "remote.origin.repo-name" 2>/dev/null || echo "unknown")
+    if $name_only; then
+        echo "$self_name"
+    else
+        echo "not a fork"
+    fi
+else
+    if $name_only; then
+        echo "$cached"
+    else
+        echo "fork of $cached"
+    fi
+fi

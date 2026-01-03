@@ -68,3 +68,6 @@
 	# show MR/PR status for current branch (works with both GitHub and GitLab)
 	mr-status = !~/.config/gitconfig/bin/git-mr-status
 	pr-status = !~/.config/gitconfig/bin/git-mr-status
+
+	# show if origin is a fork and what the parent repo is
+	upstream-info = !~/.config/gitconfig/bin/git-upstream-info
