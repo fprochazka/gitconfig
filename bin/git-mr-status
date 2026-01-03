@@ -14,9 +14,9 @@ case "$provider" in
     github)
         # gh pr view without branch arg auto-detects fork PRs correctly
         if [[ -n "$explicit_branch" ]]; then
-            json=$(gh pr view "$explicit_branch" --json url,title,body,state,statusCheckRollup 2>&1)
+            json=$(gh pr view "$explicit_branch" --json url,title,body,state,statusCheckRollup,headRefName,baseRefName,isCrossRepository,headRepositoryOwner 2>&1)
         else
-            json=$(gh pr view --json url,title,body,state,statusCheckRollup 2>&1)
+            json=$(gh pr view --json url,title,body,state,statusCheckRollup,headRefName,baseRefName,isCrossRepository,headRepositoryOwner 2>&1)
         fi || {
             echo "No pull request found for branch '${explicit_branch:-$current_branch}'"
             exit 1
@@ -26,10 +26,24 @@ case "$provider" in
         title=$(echo "$json" | jq -r '.title')
         body=$(echo "$json" | jq -r '.body')
         state=$(echo "$json" | jq -r '.state')
+        source_branch=$(echo "$json" | jq -r '.headRefName')
+        target_branch=$(echo "$json" | jq -r '.baseRefName')
+        is_cross_repo=$(echo "$json" | jq -r '.isCrossRepository')
         ci_status=$(echo "$json" | jq -r '(.statusCheckRollup // []) | map(.conclusion // .status) | unique | join(", ")' 2>/dev/null || echo "n/a")
+
+        # Format branch display with repo prefixes for cross-repo PRs
+        if [[ "$is_cross_repo" == "true" ]]; then
+            head_owner=$(echo "$json" | jq -r '.headRepositoryOwner.login')
+            # Extract base owner from URL (e.g., https://github.com/owner/repo/pull/123)
+            base_owner=$(echo "$url" | sed -E 's|https://github.com/([^/]+)/.*|\1|')
+            branch_display="${head_owner}:${source_branch} → ${base_owner}:${target_branch}"
+        else
+            branch_display="$source_branch → $target_branch"
+        fi
 
         echo "URL:    $url"
         echo "Title:  $title"
+        echo "Branch: $branch_display"
         echo "State:  $state"
         echo "CI:     ${ci_status:-n/a}"
         if [[ -n "$body" && "$body" != "null" ]]; then
@@ -54,10 +68,24 @@ case "$provider" in
         title=$(echo "$json" | jq -r '.title')
         body=$(echo "$json" | jq -r '.description')
         state=$(echo "$json" | jq -r '.state')
+        source_branch=$(echo "$json" | jq -r '.source_branch')
+        target_branch=$(echo "$json" | jq -r '.target_branch')
+        source_project_id=$(echo "$json" | jq -r '.source_project_id')
+        target_project_id=$(echo "$json" | jq -r '.target_project_id')
         ci_status=$(echo "$json" | jq -r '.pipeline.status // "n/a"')
+
+        # Format branch display with repo prefixes for cross-repo MRs
+        if [[ "$source_project_id" != "$target_project_id" ]]; then
+            source_project=$(glab api "projects/$source_project_id" 2>/dev/null | jq -r '.path_with_namespace')
+            target_project=$(glab api "projects/$target_project_id" 2>/dev/null | jq -r '.path_with_namespace')
+            branch_display="${source_project}:${source_branch} → ${target_project}:${target_branch}"
+        else
+            branch_display="$source_branch → $target_branch"
+        fi
 
         echo "URL:    $url"
         echo "Title:  $title"
+        echo "Branch: $branch_display"
         echo "State:  $state"
         echo "CI:     $ci_status"
         if [[ -n "$body" && "$body" != "null" && "$body" != "" ]]; then
