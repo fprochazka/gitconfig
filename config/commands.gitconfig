@@ -61,3 +61,6 @@
 
 	# track AI usage in commits
 	aiu = !~/.config/gitconfig/bin/git-aiu
+
+	# detect if origin remote is GitHub or GitLab (cached in .git/config)
+	remote-host-provider = !~/.config/gitconfig/bin/git-remote-host-provider

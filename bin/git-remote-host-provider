@@ -1,0 +1,29 @@
+#!/bin/bash
+# Detect if origin remote is GitHub or GitLab, cache result in .git/config
+
+set -e
+
+remote="${1:-origin}"
+config_key="remote.${remote}.vcs-host"
+
+# Try to read cached value first
+cached=$(git config --get "$config_key" 2>/dev/null || true)
+if [[ -n "$cached" ]]; then
+    echo "$cached"
+    exit 0
+fi
+
+# Detect by trying both CLIs
+if gh repo view --json name >/dev/null 2>&1; then
+    host_type="github"
+elif glab repo view -F json >/dev/null 2>&1; then
+    host_type="gitlab"
+else
+    echo "error: could not detect remote type for '$remote'" >&2
+    exit 1
+fi
+
+# Cache the result
+git config "$config_key" "$host_type"
+
+echo "$host_type"
