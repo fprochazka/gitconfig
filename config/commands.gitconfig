@@ -71,3 +71,7 @@
 
 	# show if origin is a fork and what the parent repo is
 	upstream-info = !~/.config/gitconfig/bin/git-upstream-info
+
+	# issue tracking integration (Linear, etc.)
+	issue-branch = !~/.config/gitconfig/bin/git-issue-branch
+	issue-mr = !~/.config/gitconfig/bin/git-issue-mr

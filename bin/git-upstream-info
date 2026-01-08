@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
+#
+# git-upstream-info - Show if origin is a fork and what the upstream/parent repo is
+#
+
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/vcs-hosting.sh"
 
-#
-# Usage
-#
-
-usage() {
+show_help() {
     cat <<EOF
 Usage: git upstream-info [--name-only]
 
@@ -22,128 +24,37 @@ Examples:
   git upstream-info            # 'fork of owner/repo' or 'not a fork'
   git upstream-info --name-only # 'owner/repo'
 EOF
-    exit 0
 }
-
-#
-# GitHub detection
-#
-
-detect_github_fork() {
-    local origin_url
-    origin_url=$(git remote get-url origin 2>/dev/null || true)
-
-    local origin_repo
-    origin_repo=$(echo "$origin_url" | sed -E 's#.*github\.com[:/](.+)(\.git)?$#\1#' | sed 's/\.git$//')
-
-    local json
-    if ! json=$(gh repo view "$origin_repo" --json isFork,parent,nameWithOwner 2>&1); then
-        die "Could not query GitHub repo '$origin_repo'"
-    fi
-
-    local is_fork
-    local self_name
-    local parent_name
-    is_fork=$(json_field "$json" '.isFork')
-    self_name=$(json_field "$json" '.nameWithOwner')
-    parent_name=$(json_field "$json" '.parent.owner.login + "/" + .parent.name // empty')
-
-    if [[ "$is_fork" == "true" && -n "$parent_name" ]]; then
-        git config "$CONFIG_KEY" "$parent_name"
-    else
-        git config "$CONFIG_KEY" "-"
-        git config "remote.origin.repo-name" "$self_name"
-    fi
-}
-
-#
-# GitLab detection
-#
-
-detect_gitlab_fork() {
-    local json
-    if ! json=$(glab repo view -F json 2>&1); then
-        die "Could not query GitLab repo"
-    fi
-
-    local self_name
-    local parent_name
-    self_name=$(json_field "$json" '.path_with_namespace')
-    parent_name=$(json_field "$json" '.forked_from_project.path_with_namespace // empty')
-
-    if [[ -n "$parent_name" ]]; then
-        git config "$CONFIG_KEY" "$parent_name"
-    else
-        git config "$CONFIG_KEY" "-"
-        git config "remote.origin.repo-name" "$self_name"
-    fi
-}
-
-#
-# Output
-#
-
-print_result() {
-    local cached="$1"
-    local name_only="$2"
-
-    if [[ "$cached" == "-" ]]; then
-        local self_name
-        self_name=$(git config --get "remote.origin.repo-name" 2>/dev/null || echo "unknown")
-
-        if [[ "$name_only" == "true" ]]; then
-            echo "$self_name"
-        else
-            echo "not a fork"
-        fi
-    else
-        if [[ "$name_only" == "true" ]]; then
-            echo "$cached"
-        else
-            echo "fork of $cached"
-        fi
-    fi
-}
-
-#
-# Main
-#
 
 main() {
     if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
-        usage
+        show_help
+        exit 0
     fi
+
+    require_git_repo
 
     local name_only=false
     if [[ "${1:-}" == "--name-only" ]]; then
         name_only=true
     fi
 
-    CONFIG_KEY="remote.origin.fork-parent"
+    local parent
+    parent=$(vcs_get_fork_parent)
 
-    local cached
-    cached=$(git config --get "$CONFIG_KEY" 2>/dev/null || true)
-
-    if [[ -z "$cached" ]]; then
-        local provider
-        provider=$(git remote-host-provider 2>/dev/null || echo "unknown")
-
-        case "$provider" in
-            github)
-                detect_github_fork
-                ;;
-            gitlab)
-                detect_gitlab_fork
-                ;;
-            *)
-                die "Could not detect remote provider (github/gitlab)"
-                ;;
-        esac
-
-        cached=$(git config --get "$CONFIG_KEY")
+    if [[ "$parent" == "-" ]]; then
+        if [[ "$name_only" == "true" ]]; then
+            vcs_get_repo_name
+        else
+            echo "not a fork"
+        fi
+    else
+        if [[ "$name_only" == "true" ]]; then
+            echo "$parent"
+        else
+            echo "fork of $parent"
+        fi
     fi
-
-    print_result "$cached" "$name_only"
 }
 
 main "$@"

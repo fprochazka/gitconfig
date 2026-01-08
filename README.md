@@ -32,6 +32,24 @@ Include configs using a `~/.gitconfig`
 3. `make`
 4. `sudo mv diff-highlight /usr/local/bin/diff-highlight`
 
+### Issue Tracking Configuration
+
+To use `git issue-branch` and `git issue-mr` commands, configure your issue tracking system:
+
+```gitconfig
+[issue-tracking]
+    system = linear                    # Supported: linear (more coming)
+    linearToken = lin_api_xxxxxxxxxx   # Or use LINEAR_API_TOKEN env var
+```
+
+Per-company configuration works via `includeIf`:
+
+```gitconfig
+# In /home/user/devel/my-company/.gitconfig
+[issue-tracking]
+    linearToken = lin_api_company_token
+```
+
 ## Custom Git Commands
 
 This gitconfig provides many custom git commands and aliases for enhanced productivity:
@@ -79,6 +97,22 @@ This gitconfig provides many custom git commands and aliases for enhanced produc
 ### Repository Management
 - **`git sync-all-repos [dir]`** - Recursively sync all git repositories in directory
 - **`git gitlab-clone-all`** - Clone all repositories from a GitLab group
+- **`git remote-host-provider [remote]`** - Detect if remote is GitHub or GitLab (cached)
+- **`git upstream-info [--name-only]`** - Show if origin is a fork and what the parent repo is
+
+### Merge/Pull Request Operations
+- **`git mr-status [branch]`** - Show MR/PR status for current branch (GitLab and GitHub)
+- **`git pr-status [branch]`** - Alias for `mr-status`
+
+### Issue Tracking Integration
+- **`git issue-branch <issue-id>`** - Create or checkout a branch for an issue (e.g., `fp/ENG-123-fix-login-bug`)
+- **`git issue-mr [issue-id]`** - Push branch and create GitLab MR / GitHub PR with issue title
+
+These commands integrate with issue tracking systems (currently Linear) to:
+- Fetch issue title for branch naming and MR/PR titles
+- Auto-detect GitLab vs GitHub and use appropriate CLI (`glab` / `gh`)
+- Check for existing open MR/PR before creating duplicates
+- Create as draft with "remove source branch after merge" and auto-assign to you
 
 ### Other aliases & shortcuts
 

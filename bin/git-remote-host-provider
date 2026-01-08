@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
+#
+# git-remote-host-provider - Detect if remote is GitHub or GitLab
+#
+
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/vcs-hosting.sh"
 
-#
-# Usage
-#
-
-usage() {
+show_help() {
     cat <<EOF
 Usage: git remote-host-provider [REMOTE]
 
@@ -23,54 +25,17 @@ Examples:
   git remote-host-provider           # Check origin
   git remote-host-provider upstream  # Check upstream remote
 EOF
-    exit 0
 }
-
-#
-# Detection
-#
-
-detect_host_type() {
-    if gh repo view --json name >/dev/null 2>&1; then
-        echo "github"
-    elif glab repo view -F json >/dev/null 2>&1; then
-        echo "gitlab"
-    else
-        return 1
-    fi
-}
-
-#
-# Main
-#
 
 main() {
     if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
-        usage
-    fi
-
-    local remote="${1:-origin}"
-    local config_key="remote.${remote}.vcs-host"
-
-    # Try to read cached value first
-    local cached
-    cached=$(git config --get "$config_key" 2>/dev/null || true)
-
-    if [[ -n "$cached" ]]; then
-        echo "$cached"
+        show_help
         exit 0
     fi
 
-    # Detect by trying both CLIs
-    local host_type
-    if ! host_type=$(detect_host_type); then
-        die "Could not detect remote type for '$remote'"
-    fi
+    require_git_repo
 
-    # Cache the result
-    git config "$config_key" "$host_type"
-
-    echo "$host_type"
+    vcs_get_host "${1:-origin}"
 }
 
 main "$@"

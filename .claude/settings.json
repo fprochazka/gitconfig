@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make lint)",
+      "Bash(make lint-all)",
+      "Bash(make check)",
+      "Bash(make test)",
+      "Bash(make test-help)",
+      "Bash(make help)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

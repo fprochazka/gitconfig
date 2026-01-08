@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+#
+# git-issue-mr - Push branch and create merge/pull request
+#
+# Usage: git issue-mr [issue-id]
+#
+# Pushes the current branch and creates a merge request (GitLab) or
+# pull request (GitHub) using the issue details for the title.
+#
+# If an MR/PR already exists for the current branch, opens it in browser.
+#
+# Configuration (git config):
+#   [issue-tracking]
+#       system = linear              # Issue tracking system
+#       linearToken = lin_api_xxx    # Linear API token
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/issue-tracking.sh"
+source "${SCRIPT_DIR}/lib/vcs-hosting.sh"
+
+show_help() {
+    cat << 'EOF'
+Usage: git issue-mr [issue-id]
+
+Push current branch and create a merge/pull request.
+
+Arguments:
+    issue-id    Issue identifier (optional if already stored for branch)
+
+Behavior:
+    - Detects if remote is GitLab or GitHub
+    - Checks if an MR/PR already exists for current branch
+    - If exists, opens it in the browser
+    - Otherwise, pushes branch and creates draft MR/PR with:
+      - Title: "<issue-id>: <issue-title>"
+      - Remove source branch after merge
+      - Auto-assigns to you
+
+Configuration:
+    git config --global issue-tracking.system linear
+    git config --global issue-tracking.linearToken <your-token>
+
+Examples:
+    git issue-mr              # Use issue ID from branch config
+    git issue-mr ENG-123      # Specify issue ID explicitly
+EOF
+}
+
+main() {
+    # Handle --help
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        show_help
+        exit 0
+    fi
+
+    require_git_repo
+    require_commits
+
+    local issue_id="${1:-}"
+    local branch
+
+    branch=$(get_current_branch)
+
+    # Don't create MR from main branch
+    if is_main_branch "$branch"; then
+        die "Cannot create MR from main/master branch"
+    fi
+
+    # Check if MR/PR already exists
+    local existing_url
+    if existing_url=$(vcs_mr_exists "$branch"); then
+        print_green "Merge request already exists: $existing_url"
+        return 0
+    fi
+
+    # Get issue ID - from argument, branch config, or error
+    if [[ -z "$issue_id" ]]; then
+        issue_id=$(issue_get_branch_issue_id "$branch")
+        if [[ -z "$issue_id" ]]; then
+            echo "Error: No issue ID provided and none found in branch configuration" >&2
+            echo "Usage: git issue-mr <issue-id>" >&2
+            exit 1
+        fi
+    fi
+
+    # Store issue ID in branch config if not already there
+    local stored_id
+    stored_id=$(issue_get_branch_issue_id "$branch")
+    if [[ -z "$stored_id" ]]; then
+        issue_set_branch_issue_id "$issue_id" "$branch"
+    elif [[ "$stored_id" != "$issue_id" ]]; then
+        warn "Provided issue ID '$issue_id' differs from stored ID '$stored_id'"
+        echo "Using provided issue ID: $issue_id"
+        issue_set_branch_issue_id "$issue_id" "$branch"
+    fi
+
+    # Fetch issue details
+    print_bold "Fetching issue $issue_id..."
+    local issue_json
+    issue_json=$(issue_get "$issue_id")
+
+    # Create MR title
+    local mr_title
+    mr_title=$(issue_create_mr_title "$issue_json")
+
+    print_green "MR title: $mr_title"
+
+    # Create MR/PR
+    vcs_mr_create "$mr_title"
+}
+
+main "$@"

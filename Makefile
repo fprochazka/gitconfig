@@ -1,7 +1,7 @@
-.PHONY: lint lint-fix check test help
+.PHONY: lint lint-all check test test-help help
 
 SHELL := /bin/bash
-SCRIPTS := $(shell find bin -type f -name 'git-*' -executable) bin/lib/common.sh
+SCRIPTS := $(shell find bin -type f -name 'git-*' -executable) $(wildcard bin/lib/*.sh)
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'

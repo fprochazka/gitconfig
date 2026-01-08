@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+#
+# git-issue-branch - Create or checkout a branch for an issue
+#
+# Usage: git issue-branch <issue-id>
+#
+# If a branch for the issue already exists (by git config association or
+# branch name pattern), checks it out. Otherwise creates a new branch
+# with the naming convention: <initials>/<issue-id>-<sanitized-title>
+#
+# Configuration (git config):
+#   [issue-tracking]
+#       system = linear              # Issue tracking system
+#       linearToken = lin_api_xxx    # Linear API token (or use LINEAR_API_TOKEN env)
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/issue-tracking.sh"
+
+show_help() {
+    cat << 'EOF'
+Usage: git issue-branch <issue-id>
+
+Create or checkout a branch for an issue from your issue tracking system.
+
+Arguments:
+    issue-id    Issue identifier (e.g., "ENG-123")
+
+Behavior:
+    - If a branch for this issue already exists, checks it out
+    - Otherwise, fetches issue details and creates a new branch
+
+Branch naming convention:
+    <user-initials>/<issue-id>-<sanitized-title>
+    Example: fp/ENG-123-implement-user-authentication
+
+Configuration:
+    git config --global issue-tracking.system linear
+    git config --global issue-tracking.linearToken <your-token>
+
+Examples:
+    git issue-branch ENG-123
+    git issue-branch PLAT-456
+EOF
+}
+
+main() {
+    # Handle --help
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        show_help
+        exit 0
+    fi
+
+    # Require issue ID argument
+    if [[ $# -lt 1 ]]; then
+        echo "Usage: git issue-branch <issue-id>" >&2
+        echo "Try 'git issue-branch --help' for more information." >&2
+        exit 1
+    fi
+
+    local issue_id="$1"
+
+    require_git_repo
+
+    # Check if branch already exists for this issue
+    local existing_branch
+    if existing_branch=$(issue_find_existing_branch "$issue_id"); then
+        print_green "Found existing branch: $existing_branch"
+        git checkout "$existing_branch"
+        return 0
+    fi
+
+    # Fetch issue details from API
+    print_bold "Fetching issue $issue_id..."
+    local issue_json
+    issue_json=$(issue_get "$issue_id")
+
+    local identifier
+    local title
+    identifier=$(issue_identifier "$issue_json")
+    title=$(issue_title "$issue_json")
+
+    print_green "Found: $identifier - $title"
+
+    # Create branch name
+    local branch_name
+    branch_name=$(issue_create_branch_name "$issue_json")
+
+    # Create and checkout the branch
+    git checkout -b "$branch_name"
+
+    # Store issue ID association in git config
+    issue_set_branch_issue_id "$identifier" "$branch_name"
+
+    print_green "Created branch: $branch_name"
+}
+
+main "$@"
