@@ -152,8 +152,8 @@ process_repo() {
     fi
 
     # Pull if appropriate
+    local current_branch=""
     if [[ "$status" == "ok" ]]; then
-        local current_branch
         if ! current_branch=$(get_current_branch "$repo_path"); then
             status="empty-repo"
         elif is_working_tree_clean "$repo_path" && is_main_branch "$current_branch"; then
@@ -176,7 +176,7 @@ process_repo() {
     current=$(increment_progress "$progress_file")
 
     # Output result
-    print_result "$current" "$total" "$status" "$pulled" "$repo_path"
+    print_result "$current" "$total" "$status" "$pulled" "$repo_path" "$current_branch"
 }
 
 print_result() {
@@ -185,6 +185,7 @@ print_result() {
     local status="$3"
     local pulled="$4"
     local repo_path="$5"
+    local current_branch="${6:-}"
 
     local color suffix
     case "$status" in
@@ -200,7 +201,7 @@ print_result() {
         pull-failed)   color="\033[31m"; suffix="pull failed/timeout" ;;
         empty-repo)    color="\033[33m"; suffix="empty repository" ;;
         no-upstream)   color="\033[33m"; suffix="no tracking branch" ;;
-        dirty-or-branch) color="\033[33m"; suffix="skipped: dirty or not main" ;;
+        dirty-or-branch) color="\033[33m"; suffix="skipped: dirty or not main, $current_branch is checked out" ;;
         *)             color="\033[0m";  suffix="unknown" ;;
     esac
 
