@@ -156,18 +156,22 @@ process_repo() {
     if [[ "$status" == "ok" ]]; then
         if ! current_branch=$(get_current_branch "$repo_path"); then
             status="empty-repo"
-        elif is_working_tree_clean "$repo_path" && is_main_branch "$current_branch"; then
-            if has_upstream "$repo_path"; then
-                if git_pull "$repo_path" "$timeout_seconds" >/dev/null 2>&1; then
-                    pulled="yes"
+        elif is_main_branch "$current_branch"; then
+            if is_working_tree_clean "$repo_path"; then
+                if has_upstream "$repo_path"; then
+                    if git_pull "$repo_path" "$timeout_seconds" >/dev/null 2>&1; then
+                        pulled="yes"
+                    else
+                        status="pull-failed"
+                    fi
                 else
-                    status="pull-failed"
+                    status="no-upstream"
                 fi
             else
-                status="no-upstream"
+                status="dirty"
             fi
         else
-            status="dirty-or-branch"
+            status="not-main"
         fi
     fi
 
@@ -201,7 +205,8 @@ print_result() {
         pull-failed)   color="\033[31m"; suffix="pull failed/timeout" ;;
         empty-repo)    color="\033[33m"; suffix="empty repository" ;;
         no-upstream)   color="\033[33m"; suffix="no tracking branch" ;;
-        dirty-or-branch) color="\033[33m"; suffix="skipped: dirty or not main, $current_branch is checked out" ;;
+        dirty)         color="\033[33m"; suffix="skipped: dirty, $current_branch is checked out" ;;
+        not-main)      color="\033[33m"; suffix="skipped: not main, $current_branch is checked out" ;;
         *)             color="\033[0m";  suffix="unknown" ;;
     esac
 
