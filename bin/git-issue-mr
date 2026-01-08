@@ -7,7 +7,7 @@
 # Pushes the current branch and creates a merge request (GitLab) or
 # pull request (GitHub) using the issue details for the title.
 #
-# If an MR/PR already exists for the current branch, opens it in browser.
+# If an MR/PR already exists for the current branch, prints the URL.
 #
 # Configuration (git config):
 #   [issue-tracking]
@@ -34,7 +34,7 @@ Arguments:
 Behavior:
     - Detects if remote is GitLab or GitHub
     - Checks if an MR/PR already exists for current branch
-    - If exists, opens it in the browser
+    - If exists, prints the URL and exits
     - Otherwise, pushes branch and creates draft MR/PR with:
       - Title: "<issue-id>: <issue-title>"
       - Remove source branch after merge

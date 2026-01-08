@@ -62,6 +62,8 @@ linear_get_issue() {
 
     # Make API request
     response=$(curl -s -w "\n%{http_code}" \
+        --connect-timeout 30 \
+        --max-time 120 \
         -H "Authorization: $token" \
         -H "Content-Type: application/json" \
         -d "$payload" \
