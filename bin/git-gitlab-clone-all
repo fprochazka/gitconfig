@@ -9,19 +9,21 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 usage() {
     cat <<EOF
-Usage: git gitlab-clone-all --host=GITLAB_DOMAIN --token=GITLAB_TOKEN --group=GROUP_PATH
+Usage: git gitlab-clone-all --host=GITLAB_DOMAIN --group=GROUP_PATH
 
 Clone all repositories from a GitLab group.
 
+Requires: glab CLI authenticated with the target GitLab instance.
+  Run: glab auth login --hostname GITLAB_DOMAIN
+
 Options:
   --host=GITLAB_DOMAIN     GitLab instance domain (e.g., gitlab.com)
-  --token=GITLAB_TOKEN     GitLab personal access token
   --group=GROUP_PATH       Group path to clone repositories from (e.g., my-org/sub-group)
   -h, --help               Show this help message
 
 Examples:
-  git gitlab-clone-all --host=gitlab.com --token=glpat-xyz123 --group=my-org
-  git gitlab-clone-all --host=gitlab.example.com --token=glpat-xyz123 --group=my-org/sub-group
+  git gitlab-clone-all --host=gitlab.com --group=my-org
+  git gitlab-clone-all --host=gitlab.example.com --group=my-org/sub-group
 EOF
     exit 0
 }
@@ -32,16 +34,12 @@ EOF
 
 parse_args() {
     HOST=""
-    TOKEN=""
     GROUP=""
 
     for arg in "$@"; do
         case $arg in
             --host=*)
                 HOST="${arg#*=}"
-                ;;
-            --token=*)
-                TOKEN="${arg#*=}"
                 ;;
             --group=*)
                 GROUP="${arg#*=}"
@@ -57,7 +55,6 @@ parse_args() {
 
     # Validate required parameters
     [[ -z "$HOST" ]] && die "--host is required"
-    [[ -z "$TOKEN" ]] && die "--token is required"
     [[ -z "$GROUP" ]] && die "--group is required"
 
     # Trim whitespace and newlines from GROUP
@@ -65,18 +62,17 @@ parse_args() {
 }
 
 #
-# GitLab API
+# GitLab API via glab
 #
-
-gitlab_api() {
-    local endpoint="$1"
-    local url="https://${HOST}/api/v4/${endpoint}"
-
-    curl -s --connect-timeout 30 --max-time 120 -H "PRIVATE-TOKEN: $TOKEN" "$url"
-}
 
 url_encode() {
     printf '%s' "$1" | jq -sRr @uri
+}
+
+verify_glab_auth() {
+    if ! glab auth status --hostname "$HOST" >/dev/null 2>&1; then
+        die "Not authenticated with $HOST. Run: glab auth login --hostname $HOST"
+    fi
 }
 
 #
@@ -84,36 +80,24 @@ url_encode() {
 #
 
 get_all_projects() {
-    local page=1
-    local per_page=100
-    local all_projects="[]"
     local encoded_group
     encoded_group=$(url_encode "$GROUP")
 
-    while true; do
-        local endpoint="groups/${encoded_group}/projects?page=${page}&per_page=${per_page}&include_subgroups=true&archived=false"
+    local endpoint="groups/${encoded_group}/projects?per_page=100&include_subgroups=true&archived=false&with_shared=false"
 
-        echo "Fetching page $page from GitLab API..." >&2
-        local projects
-        projects=$(gitlab_api "$endpoint")
+    echo "Fetching projects from GitLab API..." >&2
+    local projects
+    # glab --paginate outputs each page as separate JSON array, combine with jq -s 'add'
+    if ! projects=$(glab api --hostname "$HOST" --paginate "$endpoint" 2>&1 | jq -s 'add // []'); then
+        die "API error: $projects"
+    fi
 
-        # Check if response is an array (not an error object)
-        if ! echo "$projects" | jq -e 'type == "array"' >/dev/null 2>&1; then
-            die "API error: $(echo "$projects" | jq -r '.message // .error // "Unknown error"')"
-        fi
+    # Check if response is an array (not an error object)
+    if ! echo "$projects" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        die "API error: $(echo "$projects" | jq -r '.message // .error // "Unknown error"')"
+    fi
 
-        # Check if we got any projects
-        local count
-        count=$(echo "$projects" | jq 'length')
-        if [[ "$count" -eq 0 ]]; then
-            break
-        fi
-
-        all_projects=$(echo "$all_projects" "$projects" | jq -s 'add')
-        ((page++))
-    done
-
-    echo "$all_projects"
+    echo "$projects"
 }
 
 verify_group_exists() {
@@ -121,12 +105,14 @@ verify_group_exists() {
     encoded_group=$(url_encode "$GROUP")
 
     local group_info
-    group_info=$(gitlab_api "groups/${encoded_group}?with_projects=false")
+    if ! group_info=$(glab api --hostname "$HOST" "groups/${encoded_group}?with_projects=false" 2>&1); then
+        die "Group '$GROUP' not found or not accessible: $group_info"
+    fi
 
     # Check if the group exists by looking for an error or empty response
     if [[ -z "$group_info" ]] || echo "$group_info" | jq -e '.message' >/dev/null 2>&1; then
         if echo "$group_info" | jq -e '.message' >/dev/null 2>&1; then
-            die "Group '$GROUP' not found. GitLab API error: $(json_field "$group_info" '.message')"
+            die "Group '$GROUP' not found. GitLab API error: $(echo "$group_info" | jq -r '.message')"
         fi
         die "Group '$GROUP' not found or not accessible."
     fi
@@ -175,6 +161,10 @@ main() {
     echo "GitLab Clone All Repositories"
     echo "Host: $HOST"
     echo "Group: $GROUP"
+    echo ""
+
+    echo "Verifying glab authentication..."
+    verify_glab_auth
     echo ""
 
     echo "Verifying group exists..."
