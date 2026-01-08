@@ -1,95 +1,132 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
-# Function to show usage
+#
+# Usage
+#
+
 usage() {
-    echo "Usage: git fpush-stack [git push options...]"
-    echo ""
-    echo "Force-pushes all branches that have been updated by git rebase --update-refs."
-    echo "This script discovers all branches that contain commits from the current branch"
-    echo "and pushes them with the provided git push options."
-    echo ""
-    echo "Examples:"
-    echo "  git fpush-stack"
-    echo "  git fpush-stack -o ci.skip"
-    echo "  git fpush-stack --dry-run"
-    exit 1
+    cat <<EOF
+Usage: git fpush-stack [git push options...]
+
+Force-pushes all branches that have been updated by git rebase --update-refs.
+This script discovers all branches that contain commits from the current branch
+and pushes them with the provided git push options.
+
+Examples:
+  git fpush-stack
+  git fpush-stack -o ci.skip
+  git fpush-stack --dry-run
+
+Options:
+  -h, --help    Show this help message
+EOF
+    exit 0
 }
 
-# Check if we're in a git repository
-if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not in a git repository" >&2
-    exit 1
-fi
+#
+# Branch discovery
+#
 
-# Handle help flag
-if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
-    usage
-fi
+discover_branches_to_push() {
+    git branches-stacked-list
+}
 
-# Get the current branch
-current_branch=$(git get-current-branch)
-echo "Current branch: $current_branch"
+#
+# Push operations
+#
 
-# Get the main branch to use as base
-main_branch=$(git get-main-branch)
-echo "Main branch: $main_branch"
+push_branch() {
+    local branch="$1"
+    shift
+    local push_args=("$@")
 
-# Discover branches using the dedicated command
-echo "Discovering branches that contain commits from current branch..."
+    local remote
+    local remote_branch
+    remote=$(get_branch_remote "$branch")
+    remote_branch=$(get_branch_upstream "$branch")
 
-# Get list of stacked branches (only those with tracking remotes)
-branches_output=$(git branches-stacked-list)
-
-if [[ -z "$branches_output" ]]; then
-    echo "No commits found in current branch that aren't in $main_branch"
-    echo "Nothing to push."
-    exit 0
-fi
-
-# Convert output to array
-readarray -t branches_to_push <<< "$branches_output"
-
-if [[ ${#branches_to_push[@]} -eq 0 ]]; then
-    echo "No branches with tracking remotes found to push."
-    exit 0
-fi
-
-echo "Found ${#branches_to_push[@]} branch(es) to push:"
-for branch in "${branches_to_push[@]}"; do
-    remote=$(git config "branch.$branch.remote")
-    remote_branch=$(git config "branch.$branch.merge" | sed 's|refs/heads/||')
-    echo "  $branch -> $remote/$remote_branch"
-done
-
-echo ""
-
-# Push each branch
-failed_pushes=()
-for branch in "${branches_to_push[@]}"; do
-    remote=$(git config "branch.$branch.remote")
-    remote_branch=$(git config "branch.$branch.merge" | sed 's|refs/heads/||')
-    
     echo "Pushing $branch to $remote/$remote_branch..."
-    
-    # Use git fpush (force-with-lease) with any additional arguments passed to this script
-    if git fpush "$@" "$remote" "$branch:$remote_branch"; then
-        echo "✓ Successfully pushed $branch"
-    else
-        echo "✗ Failed to push $branch" >&2
-        failed_pushes+=("$branch")
-    fi
-    echo ""
-done
 
-# Report results
-if [[ ${#failed_pushes[@]} -eq 0 ]]; then
-    echo "All branches pushed successfully!"
-else
-    echo "Failed to push ${#failed_pushes[@]} branch(es):" >&2
-    for branch in "${failed_pushes[@]}"; do
-        echo "  - $branch" >&2
+    if git fpush "${push_args[@]}" "$remote" "$branch:$remote_branch"; then
+        print_green "Successfully pushed $branch"
+        return 0
+    else
+        print_red "Failed to push $branch"
+        return 1
+    fi
+}
+
+#
+# Main
+#
+
+main() {
+    if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+        usage
+    fi
+
+    require_git_repo
+
+    local current_branch
+    current_branch=$(get_current_branch)
+    echo "Current branch: $current_branch"
+
+    local main_branch
+    main_branch=$(get_main_branch)
+    echo "Main branch: $main_branch"
+
+    echo "Discovering branches that contain commits from current branch..."
+
+    local branches_output
+    branches_output=$(discover_branches_to_push)
+
+    if [[ -z "$branches_output" ]]; then
+        echo "No commits found in current branch that aren't in $main_branch"
+        echo "Nothing to push."
+        exit 0
+    fi
+
+    # Convert output to array
+    local -a branches_to_push
+    readarray -t branches_to_push <<< "$branches_output"
+
+    if [[ ${#branches_to_push[@]} -eq 0 ]]; then
+        echo "No branches with tracking remotes found to push."
+        exit 0
+    fi
+
+    echo "Found ${#branches_to_push[@]} branch(es) to push:"
+    for branch in "${branches_to_push[@]}"; do
+        local remote
+        local remote_branch
+        remote=$(get_branch_remote "$branch")
+        remote_branch=$(get_branch_upstream "$branch")
+        echo "  $branch -> $remote/$remote_branch"
     done
-    exit 1
-fi
+    echo ""
+
+    # Push each branch
+    local -a failed_pushes=()
+    for branch in "${branches_to_push[@]}"; do
+        if ! push_branch "$branch" "$@"; then
+            failed_pushes+=("$branch")
+        fi
+        echo ""
+    done
+
+    # Report results
+    if [[ ${#failed_pushes[@]} -eq 0 ]]; then
+        print_green "All branches pushed successfully!"
+    else
+        print_red "Failed to push ${#failed_pushes[@]} branch(es):"
+        for branch in "${failed_pushes[@]}"; do
+            echo "  - $branch" >&2
+        done
+        exit 1
+    fi
+}
+
+main "$@"

@@ -1,75 +1,73 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
-print_usage() {
-    echo "Usage: $0 --host=GITLAB_DOMAIN --token=GITLAB_TOKEN --group=GROUP_PATH"
-    echo ""
-    echo "Options:"
-    echo "  --host=GITLAB_DOMAIN     GitLab instance domain (e.g., gitlab.com)"
-    echo "  --token=GITLAB_TOKEN     GitLab personal access token"
-    echo "  --group=GROUP_PATH       Group path to clone repositories from (e.g., my-org/sub-group)"
-    echo ""
-    echo "Examples:"
-    echo "  $0 --host=gitlab.com --token=glpat-xyz123 --group=my-org"
-    echo "  $0 --host=gitlab.example.com --token=glpat-xyz123 --group=my-org/sub-group"
-    exit 1
+#
+# Usage
+#
+
+usage() {
+    cat <<EOF
+Usage: git gitlab-clone-all --host=GITLAB_DOMAIN --token=GITLAB_TOKEN --group=GROUP_PATH
+
+Clone all repositories from a GitLab group.
+
+Options:
+  --host=GITLAB_DOMAIN     GitLab instance domain (e.g., gitlab.com)
+  --token=GITLAB_TOKEN     GitLab personal access token
+  --group=GROUP_PATH       Group path to clone repositories from (e.g., my-org/sub-group)
+  -h, --help               Show this help message
+
+Examples:
+  git gitlab-clone-all --host=gitlab.com --token=glpat-xyz123 --group=my-org
+  git gitlab-clone-all --host=gitlab.example.com --token=glpat-xyz123 --group=my-org/sub-group
+EOF
+    exit 0
 }
 
-# Parse command line arguments
-HOST=""
-TOKEN=""
-GROUP=""
+#
+# Argument parsing
+#
 
-for arg in "$@"; do
-    case $arg in
-        --host=*)
-            HOST="${arg#*=}"
-            shift
-            ;;
-        --token=*)
-            TOKEN="${arg#*=}"
-            shift
-            ;;
-        --group=*)
-            GROUP="${arg#*=}"
-            shift
-            ;;
-        -h|--help)
-            print_usage
-            ;;
-        *)
-            echo "Unknown option: $arg"
-            print_usage
-            ;;
-    esac
-done
+parse_args() {
+    HOST=""
+    TOKEN=""
+    GROUP=""
 
-# Validate required parameters
-if [[ -z "$HOST" ]]; then
-    echo "Error: --host is required"
-    print_usage
-fi
+    for arg in "$@"; do
+        case $arg in
+            --host=*)
+                HOST="${arg#*=}"
+                ;;
+            --token=*)
+                TOKEN="${arg#*=}"
+                ;;
+            --group=*)
+                GROUP="${arg#*=}"
+                ;;
+            -h|--help)
+                usage
+                ;;
+            *)
+                die "Unknown option: $arg"
+                ;;
+        esac
+    done
 
-if [[ -z "$TOKEN" ]]; then
-    echo "Error: --token is required"
-    print_usage
-fi
+    # Validate required parameters
+    [[ -z "$HOST" ]] && die "--host is required"
+    [[ -z "$TOKEN" ]] && die "--token is required"
+    [[ -z "$GROUP" ]] && die "--group is required"
 
-if [[ -z "$GROUP" ]]; then
-    echo "Error: --group is required"
-    print_usage
-fi
+    # Trim whitespace and newlines from GROUP
+    GROUP=$(echo -n "$GROUP" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+}
 
-# Trim whitespace and newlines from GROUP
-GROUP=$(echo -n "$GROUP" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+#
+# GitLab API
+#
 
-echo "GitLab Clone All Repositories"
-echo "Host: $HOST"
-echo "Group: $GROUP"
-echo ""
-
-# Function to make GitLab API requests
 gitlab_api() {
     local endpoint="$1"
     local url="https://${HOST}/api/v4/${endpoint}"
@@ -77,19 +75,27 @@ gitlab_api() {
     curl -s -H "PRIVATE-TOKEN: $TOKEN" "$url"
 }
 
-# Function to get all projects (with pagination)
+url_encode() {
+    printf '%s' "$1" | jq -sRr @uri
+}
+
+#
+# Project discovery
+#
+
 get_all_projects() {
     local page=1
     local per_page=100
     local all_projects=""
+    local encoded_group
+    encoded_group=$(url_encode "$GROUP")
 
     while true; do
-        # URL encode the group path
-        local encoded_group=$(printf '%s' "$GROUP" | jq -sRr @uri)
         local endpoint="groups/${encoded_group}/projects?page=${page}&per_page=${per_page}&include_subgroups=true&archived=false"
 
         echo "Fetching page $page from GitLab API..." >&2
-        local projects=$(gitlab_api "$endpoint")
+        local projects
+        projects=$(gitlab_api "$endpoint")
 
         # Check if we got any projects
         if [[ $(echo "$projects" | jq '. | length') -eq 0 ]]; then
@@ -108,66 +114,90 @@ get_all_projects() {
     echo "$all_projects"
 }
 
-# Function to clone a repository
+verify_group_exists() {
+    local encoded_group
+    encoded_group=$(url_encode "$GROUP")
+
+    local group_info
+    group_info=$(gitlab_api "groups/${encoded_group}?with_projects=false")
+
+    # Check if the group exists by looking for an error or empty response
+    if [[ -z "$group_info" ]] || echo "$group_info" | jq -e '.message' >/dev/null 2>&1; then
+        if echo "$group_info" | jq -e '.message' >/dev/null 2>&1; then
+            die "Group '$GROUP' not found. GitLab API error: $(json_field "$group_info" '.message')"
+        fi
+        die "Group '$GROUP' not found or not accessible."
+    fi
+
+    echo "Group found: $(json_field "$group_info" '.full_name // .name')"
+}
+
+#
+# Clone operations
+#
+
 clone_repo() {
     local ssh_url="$1"
     local path_with_namespace="$2"
 
     # Create directory structure if it doesn't exist
-    local dir_path=$(dirname "$path_with_namespace")
+    local dir_path
+    dir_path=$(dirname "$path_with_namespace")
     if [[ "$dir_path" != "." ]]; then
         mkdir -p "$dir_path"
     fi
 
     if [[ -d "$path_with_namespace" ]]; then
-        echo "  Directory already exists, skipping: $path_with_namespace"
-        return
+        print_yellow "  Directory already exists, skipping: $path_with_namespace"
+        return 0
     fi
 
     echo "  Cloning: $ssh_url -> $path_with_namespace"
     if git clone "$ssh_url" "$path_with_namespace"; then
-        echo "  ✓ Successfully cloned: $path_with_namespace"
+        print_green "  Successfully cloned: $path_with_namespace"
     else
-        echo "  ✗ Failed to clone: $path_with_namespace"
+        print_red "  Failed to clone: $path_with_namespace"
         return 1
     fi
 }
 
-# Check if group exists
-echo "Verifying group exists..."
-encoded_group=$(printf '%s' "$GROUP" | jq -sRr @uri)
-group_info=$(gitlab_api "groups/${encoded_group}?with_projects=false")
+#
+# Main
+#
 
-# Check if the group exists by looking for an error or empty response
-if [[ -z "$group_info" ]] || echo "$group_info" | jq -e '.message' >/dev/null 2>&1; then
-    echo "Error: Group '$GROUP' not found or not accessible."
-    if echo "$group_info" | jq -e '.message' >/dev/null 2>&1; then
-        echo "GitLab API error: $(echo "$group_info" | jq -r '.message')"
+main() {
+    parse_args "$@"
+
+    echo "GitLab Clone All Repositories"
+    echo "Host: $HOST"
+    echo "Group: $GROUP"
+    echo ""
+
+    echo "Verifying group exists..."
+    verify_group_exists
+    echo ""
+
+    echo "Fetching repositories from GitLab..."
+    local projects
+    projects=$(get_all_projects)
+
+    if [[ -z "$projects" ]] || [[ "$projects" == "null" ]] || [[ $(echo "$projects" | jq '. | length') -eq 0 ]]; then
+        echo "No repositories found."
+        exit 0
     fi
-    exit 1
-fi
 
-echo "Group found: $(echo "$group_info" | jq -r '.full_name // .name')"
-echo ""
+    local project_count
+    project_count=$(echo "$projects" | jq '. | length')
+    echo "Found $project_count repositories to clone"
+    echo ""
 
-# Main execution
-echo "Fetching repositories from GitLab..."
+    # Process each project
+    echo "$projects" | jq -r '.[] | "\(.ssh_url_to_repo)|\(.path_with_namespace)"' | while IFS='|' read -r ssh_url path_with_namespace; do
+        clone_repo "$ssh_url" "$path_with_namespace"
+    done
 
-projects=$(get_all_projects)
+    echo ""
+    print_green "GitLab clone operation completed!"
+}
 
-if [[ -z "$projects" ]] || [[ "$projects" == "null" ]] || [[ $(echo "$projects" | jq '. | length') -eq 0 ]]; then
-    echo "No repositories found."
-    exit 0
-fi
-
-project_count=$(echo "$projects" | jq '. | length')
-echo "Found $project_count repositories to clone"
-echo ""
-
-# Process each project
-echo "$projects" | jq -r '.[] | "\(.ssh_url_to_repo)|\(.path_with_namespace)"' | while IFS='|' read -r ssh_url path_with_namespace; do
-    clone_repo "$ssh_url" "$path_with_namespace"
-done
-
-echo ""
-echo "GitLab clone operation completed!"
+main "$@"

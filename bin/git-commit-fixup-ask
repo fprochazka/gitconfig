@@ -1,80 +1,146 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
-# Function to show usage
+#
+# Usage
+#
+
 usage() {
-    echo "Usage: git commit-fixup-ask"
-    echo ""
-    echo "Interactively create a fixup commit for staged changes."
-    echo "Shows commits in the current branch and lets you pick which one to fixup."
-    echo "Only works when you have staged changes ready to commit."
-    echo ""
-    echo "The command will:"
-    echo "  1. Show all commits in current branch (excluding fixup/squash commits)"
-    echo "  2. Show which staged files would be affected"
-    echo "  3. Let you choose which commit to create a fixup for"
-    echo ""
-    echo "Examples:"
-    echo "  git add file.txt"
-    echo "  git commit-fixup-ask"
-    echo ""
-    echo "Options:"
-    echo "  -h, --help    Show this help message"
-    exit 1
+    cat <<EOF
+Usage: git commit-fixup-ask
+
+Interactively create a fixup commit for staged changes.
+Shows commits in the current branch and lets you pick which one to fixup.
+Only works when you have staged changes ready to commit.
+
+The command will:
+  1. Show all commits in current branch (excluding fixup/squash commits)
+  2. Show which staged files would be affected
+  3. Let you choose which commit to create a fixup for
+
+Examples:
+  git add file.txt
+  git commit-fixup-ask
+
+Options:
+  -h, --help    Show this help message
+EOF
+    exit 0
 }
 
-# Handle help flag
-if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
-    usage
-fi
+#
+# Staged changes check
+#
 
-# Check if we're in a git repository
-if ! git rev-parse --git-dir > /dev/null 2>&1; then
-    echo "Error: Not a git repository" >&2
-    exit 1
-fi
-
-if git diff --cached --quiet --exit-code; then
-    echo "Nothing to commit";
-    exit 1;
-fi
-
-relativeToHead=0;
-while IFS= read -r commitId; do
-    commitMessage=$(git --no-pager log --format=%B -n 1 $commitId)
-    if [[ ${commitMessage:0:7} == "fixup! " ]] || [[ ${commitMessage:0:8} == "squash! " ]]; then
-        ((relativeToHead++)) || true;
-        continue;
+require_staged_changes() {
+    if git diff --cached --quiet --exit-code; then
+        die "Nothing to commit"
     fi
+}
 
-    git --no-pager log --pretty="format:${relativeToHead}.  %Cred%h%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset" --date=relative -n1 $commitId;
+#
+# Commit display
+#
+
+is_fixup_or_squash_commit() {
+    local message="$1"
+    [[ "${message:0:7}" == "fixup! " ]] || [[ "${message:0:8}" == "squash! " ]]
+}
+
+display_commit_with_stats() {
+    local commit_id="$1"
+    local index="$2"
+
+    # Show commit info
+    git --no-pager log \
+        --pretty="format:${index}.  %Cred%h%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset" \
+        --date=relative \
+        -n1 "$commit_id"
     echo
-    for filename in $(git --no-pager diff --cached --name-only); do
-        # Temporarily disable pipefail for this specific pipeline
+
+    # Show which staged files are affected by this commit
+    local staged_files
+    staged_files=$(git --no-pager diff --cached --name-only)
+
+    for filename in $staged_files; do
+        # Temporarily disable pipefail for this pipeline
         set +o pipefail
-        git --no-pager diff --stat=160 --color "$commitId" "$commitId^" -- "$filename" 2>/dev/null | head -n 1
+        git --no-pager diff --stat=160 --color "$commit_id" "${commit_id}^" -- "$filename" 2>/dev/null | head -n 1
         set -o pipefail
     done
+}
 
-    ((relativeToHead++)) || true;
-done < <(git --no-pager log --format=%H "$(git get-main-branch)...HEAD")
-if [ "$relativeToHead" -eq 0 ]; then
-    echo "no commits in branch found using $(git get-main-branch)...HEAD range";
-    exit 1;
-fi
-((relativeToHead--))
+get_commits_for_branch() {
+    local main_branch="$1"
+    git --no-pager log --format=%H "${main_branch}...HEAD"
+}
 
-echo;
-read -p "Pick a commit [0..${relativeToHead}]: " targetCommit
+#
+# User input
+#
 
-if [ -z "${targetCommit##*[!0-9]*}" ]; then
-    echo "expected a number in range [0..${relativeToHead}]";
-    exit 2;
-fi
-if [ ! "$targetCommit" -ge 0 -o ! "$targetCommit" -le "$relativeToHead" ]; then
-    echo "expected a number in range [0..${relativeToHead}]";
-    exit 3;
-fi
+prompt_for_commit() {
+    local max_index="$1"
 
-git commit --fixup "HEAD~$targetCommit"
+    echo >&2
+    read -p "Pick a commit [0..${max_index}]: " target_commit
+
+    if ! is_integer "$target_commit"; then
+        die "Expected a number in range [0..${max_index}]"
+    fi
+
+    if ! is_in_range "$target_commit" 0 "$max_index"; then
+        die "Expected a number in range [0..${max_index}]"
+    fi
+
+    echo "$target_commit"
+}
+
+#
+# Main
+#
+
+main() {
+    # Handle help flag
+    if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+        usage
+    fi
+
+    require_git_repo
+    require_staged_changes
+
+    local main_branch
+    main_branch=$(get_main_branch)
+
+    local relative_to_head=0
+    local found_commits=false
+
+    while IFS= read -r commit_id; do
+        local commit_message
+        commit_message=$(git --no-pager log --format=%B -n 1 "$commit_id")
+
+        if is_fixup_or_squash_commit "$commit_message"; then
+            ((relative_to_head++)) || true
+            continue
+        fi
+
+        display_commit_with_stats "$commit_id" "$relative_to_head"
+        ((relative_to_head++)) || true
+        found_commits=true
+    done < <(get_commits_for_branch "$main_branch")
+
+    if [[ "$found_commits" == "false" ]]; then
+        die "No commits in branch found using ${main_branch}...HEAD range"
+    fi
+
+    ((relative_to_head--))
+
+    local target
+    target=$(prompt_for_commit "$relative_to_head")
+
+    git commit --fixup "HEAD~$target"
+}
+
+main "$@"

@@ -1,47 +1,46 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
-# Function to show usage
+#
+# Usage
+#
+
 usage() {
-    echo "Usage: git current-branch-name"
-    echo ""
-    echo "Get the current branch name, even during an ongoing rebase."
-    echo "This command works correctly in situations where 'git branch' shows"
-    echo "a detached HEAD state during interactive rebases."
-    echo ""
-    echo "Returns:"
-    echo "  - During rebase: the original branch name being rebased"
-    echo "  - Normal state: the current branch name"
-    echo ""
-    echo "Examples:"
-    echo "  git current-branch-name"
-    echo "  branch=\$(git current-branch-name)"
-    echo ""
-    echo "Options:"
-    echo "  -h, --help    Show this help message"
-    exit 1
+    cat <<EOF
+Usage: git current-branch-name
+
+Get the current branch name, even during an ongoing rebase.
+This command works correctly in situations where 'git branch' shows
+a detached HEAD state during interactive rebases.
+
+Returns:
+  - During rebase: the original branch name being rebased
+  - Normal state: the current branch name
+
+Examples:
+  git current-branch-name
+  branch=\$(git current-branch-name)
+
+Options:
+  -h, --help    Show this help message
+EOF
+    exit 0
 }
 
-# Handle help flag
-if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
-    usage
-fi
+#
+# Main
+#
 
-# Check if we're in a git repository
-if ! git rev-parse --git-dir > /dev/null 2>&1; then
-    echo "Error: Not a git repository" >&2
-    exit 1
-fi
-
-## thx https://stackoverflow.com/a/59115583/602899
-for location in rebase-merge rebase-apply; do
-    path=$(git rev-parse --git-path ${location})
-    if test -d ${path}; then
-        revision=$(<${path}/head-name)
-        echo ${revision##refs/heads/}
-        exit 0
+main() {
+    if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+        usage
     fi
-done
 
-git rev-parse --abbrev-ref HEAD
+    require_git_repo
+
+    get_current_branch
+}
+
+main "$@"

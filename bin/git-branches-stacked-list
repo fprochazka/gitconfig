@@ -1,98 +1,128 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
-# Function to show usage
+#
+# Usage
+#
+
 usage() {
-    echo "Usage: git branches-stacked-list [--with-remotes]"
-    echo ""
-    echo "Lists all local branches that contain commits from the current branch."
-    echo "By default, only shows branches with tracking remotes."
-    echo ""
-    echo "Options:"
-    echo "  --with-remotes    Include remote tracking information in output"
-    echo "  --all            Show all branches, even without tracking remotes"
-    echo "  -h, --help       Show this help message"
-    exit 1
+    cat <<EOF
+Usage: git branches-stacked-list [--with-remotes] [--all]
+
+Lists all local branches that contain commits from the current branch.
+By default, only shows branches with tracking remotes.
+
+Options:
+  --with-remotes    Include remote tracking information in output
+  --all             Show all branches, even without tracking remotes
+  -h, --help        Show this help message
+EOF
+    exit 0
 }
 
-# Parse arguments
-show_remotes=false
-show_all=false
+#
+# Argument parsing
+#
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --with-remotes)
-            show_remotes=true
-            shift
-            ;;
-        --all)
-            show_all=true
-            shift
-            ;;
-        -h|--help)
-            usage
-            ;;
-        *)
-            echo "Unknown option: $1" >&2
-            usage
-            ;;
-    esac
-done
+parse_args() {
+    SHOW_REMOTES=false
+    SHOW_ALL=false
 
-# Check if we're in a git repository
-if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not in a git repository" >&2
-    exit 1
-fi
-
-# Get the current branch and main branch
-current_branch=$(git get-current-branch)
-main_branch=$(git get-main-branch)
-
-# Get all commits in current branch that aren't in main branch
-commits_in_branch=$(git rev-list "$main_branch..$current_branch" 2>/dev/null || true)
-
-if [[ -z "$commits_in_branch" ]]; then
-    exit 0
-fi
-
-# Find all branches that contain any of these commits
-branches_found=()
-for commit in $commits_in_branch; do
-    # Get branches that contain this commit, excluding remote branches
-    commit_branches=$(git branch --contains "$commit" 2>/dev/null | grep -v '^\s*remotes/' | sed 's/^\s*\*//' | sed 's/^\s*//' || true)
-    
-    for branch in $commit_branches; do
-        # Skip if branch is already in our list
-        if [[ ! " ${branches_found[@]:-} " =~ " $branch " ]]; then
-            # If --all is specified, include all branches
-            if [[ "$show_all" == "true" ]]; then
-                branches_found+=("$branch")
-            else
-                # Otherwise, only include branches with tracking remotes
-                if git config "branch.$branch.remote" >/dev/null 2>&1; then
-                    branches_found+=("$branch")
-                fi
-            fi
-        fi
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --with-remotes)
+                SHOW_REMOTES=true
+                shift
+                ;;
+            --all)
+                SHOW_ALL=true
+                shift
+                ;;
+            -h|--help)
+                usage
+                ;;
+            *)
+                die "Unknown option: $1"
+                ;;
+        esac
     done
-done
+}
 
-# Sort and deduplicate
-if [[ ${#branches_found[@]} -eq 0 ]]; then
-    exit 0
-fi
+#
+# Branch discovery
+#
 
-# Sort branches
-IFS=$'\n' branches_found=($(printf '%s\n' "${branches_found[@]}" | sort -u))
+get_commits_in_branch() {
+    local main_branch="$1"
+    local current_branch="$2"
+    git rev-list "${main_branch}..${current_branch}" 2>/dev/null || true
+}
 
-# Output branches
-for branch in "${branches_found[@]}"; do
+get_branches_containing_commit() {
+    local commit="$1"
+    git branch --contains "$commit" 2>/dev/null \
+        | grep -v '^\s*remotes/' \
+        | sed 's/^\s*\*//' \
+        | sed 's/^\s*//' \
+        || true
+}
+
+has_tracking_remote() {
+    local branch="$1"
+    git config "branch.${branch}.remote" >/dev/null 2>&1
+}
+
+find_stacked_branches() {
+    local main_branch="$1"
+    local current_branch="$2"
+    local show_all="$3"
+
+    local commits_in_branch
+    commits_in_branch=$(get_commits_in_branch "$main_branch" "$current_branch")
+
+    if [[ -z "$commits_in_branch" ]]; then
+        return
+    fi
+
+    local -A branches_found=()
+
+    for commit in $commits_in_branch; do
+        local commit_branches
+        commit_branches=$(get_branches_containing_commit "$commit")
+
+        for branch in $commit_branches; do
+            # Skip if branch is already in our set
+            if [[ -n "${branches_found[$branch]:-}" ]]; then
+                continue
+            fi
+
+            # Include all branches or only those with tracking remotes
+            if [[ "$show_all" == "true" ]] || has_tracking_remote "$branch"; then
+                branches_found[$branch]=1
+            fi
+        done
+    done
+
+    # Output sorted branch names
+    printf '%s\n' "${!branches_found[@]}" | sort
+}
+
+#
+# Output
+#
+
+print_branch_info() {
+    local branch="$1"
+    local show_remotes="$2"
+
     if [[ "$show_remotes" == "true" ]]; then
-        if git config "branch.$branch.remote" >/dev/null 2>&1; then
-            remote=$(git config "branch.$branch.remote")
-            remote_branch=$(git config "branch.$branch.merge" | sed 's|refs/heads/||')
+        if has_tracking_remote "$branch"; then
+            local remote
+            local remote_branch
+            remote=$(get_branch_remote "$branch")
+            remote_branch=$(get_branch_upstream "$branch")
             echo "$branch -> $remote/$remote_branch"
         else
             echo "$branch (no tracking remote)"
@@ -100,4 +130,33 @@ for branch in "${branches_found[@]}"; do
     else
         echo "$branch"
     fi
-done
+}
+
+#
+# Main
+#
+
+main() {
+    parse_args "$@"
+
+    require_git_repo
+
+    local current_branch
+    current_branch=$(get_current_branch)
+
+    local main_branch
+    main_branch=$(get_main_branch)
+
+    local branches
+    branches=$(find_stacked_branches "$main_branch" "$current_branch" "$SHOW_ALL")
+
+    if [[ -z "$branches" ]]; then
+        exit 0
+    fi
+
+    while IFS= read -r branch; do
+        print_branch_info "$branch" "$SHOW_REMOTES"
+    done <<< "$branches"
+}
+
+main "$@"

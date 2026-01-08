@@ -1,35 +1,50 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
-# Function to show usage
+#
+# Usage
+#
+
 usage() {
-    echo "Usage: git log-vgrep-most-recent-commit PATTERN [<since>..<until>]"
-    echo ""
-    echo "Find the most recent commit that does NOT match the given pattern."
-    echo "Useful for finding the last non-trivial commit before a series of"
-    echo "fixup commits, merge commits, or commits matching a specific pattern."
-    echo ""
-    echo "Arguments:"
-    echo "  PATTERN           Grep pattern to exclude from results"
-    echo "  [<since>..<until>] Optional commit range (default: all history)"
-    echo ""
-    echo "Examples:"
-    echo "  git log-vgrep-most-recent-commit 'fixup!'"
-    echo "  git log-vgrep-most-recent-commit 'Merge' HEAD~10..HEAD"
-    echo "  git log-vgrep-most-recent-commit 'WIP' origin/main..HEAD"
-    echo ""
-    echo "Options:"
-    echo "  -h, --help    Show this help message"
-    exit 1
+    cat <<EOF
+Usage: git log-vgrep-most-recent-commit PATTERN [<since>..<until>]
+
+Find the most recent commit that does NOT match the given pattern.
+Useful for finding the last non-trivial commit before a series of
+fixup commits, merge commits, or commits matching a specific pattern.
+
+Arguments:
+  PATTERN             Grep pattern to exclude from results
+  [<since>..<until>]  Optional commit range (default: all history)
+
+Examples:
+  git log-vgrep-most-recent-commit 'fixup!'
+  git log-vgrep-most-recent-commit 'Merge' HEAD~10..HEAD
+  git log-vgrep-most-recent-commit 'WIP' origin/main..HEAD
+
+Options:
+  -h, --help    Show this help message
+EOF
+    exit 0
 }
 
-# Handle help flag and validate arguments
-if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]] || (( $# < 1 )); then
-    usage
-fi
-pattern=$1
-shift
-git log --format=%H $@ |
-  grep -v -f <(git log --format=%H "--grep=$pattern" $@) |
-  git log -1 --format="%H" --stdin --no-walk
+#
+# Main
+#
+
+main() {
+    if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]] || (( $# < 1 )); then
+        usage
+    fi
+
+    local pattern="$1"
+    shift
+
+    git log --format=%H "$@" |
+        grep -v -f <(git log --format=%H "--grep=$pattern" "$@") |
+        git log -1 --format="%H" --stdin --no-walk
+}
+
+main "$@"

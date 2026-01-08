@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
 #
 # Configuration
@@ -9,15 +10,6 @@ set -euo pipefail
 MAX_JOBS=10
 TIMEOUT_SECONDS=60
 PROGRESS_FILE=""
-
-#
-# Output helpers
-#
-
-color_red() { echo -e "\033[31m$1\033[0m"; }
-color_green() { echo -e "\033[32m$1\033[0m"; }
-color_yellow() { echo -e "\033[33m$1\033[0m"; }
-color_bold() { echo -e "\033[1m$1\033[0m"; }
 
 #
 # Usage
@@ -52,7 +44,7 @@ Examples:
 Options:
   -h, --help    Show this help message
 EOF
-    exit 1
+    exit 0
 }
 
 #
@@ -60,7 +52,7 @@ EOF
 #
 
 cleanup() {
-    echo -e "\n\033[33mInterrupted, stopping...\033[0m"
+    echo -e "\n${COLOR_YELLOW}Interrupted, stopping...${COLOR_RESET}"
     pkill -P $$ 2>/dev/null || true
     [[ -n "$PROGRESS_FILE" ]] && rm -f "$PROGRESS_FILE" 2>/dev/null || true
     exit 130
@@ -78,23 +70,10 @@ find_repos() {
 }
 
 #
-# Progress tracking
-#
-
-increment_progress() {
-    local progress_file="$1"
-    flock "$progress_file" bash -c "
-        n=\$(cat '$progress_file' 2>/dev/null || echo 0)
-        echo \$((n + 1)) > '$progress_file'
-        cat '$progress_file'
-    "
-}
-
-#
 # Git operations
 #
 
-git_fetch() {
+repo_git_fetch() {
     local repo_path="$1"
     local timeout_seconds="$2"
     timeout "${timeout_seconds}s" git -C "$repo_path" \
@@ -103,7 +82,7 @@ git_fetch() {
         fetch --all 2>&1
 }
 
-git_pull() {
+repo_git_pull() {
     local repo_path="$1"
     local timeout_seconds="$2"
     timeout "${timeout_seconds}s" git -C "$repo_path" \
@@ -112,25 +91,20 @@ git_pull() {
         pull 2>&1
 }
 
-is_working_tree_clean() {
+repo_is_worktree_clean() {
     local repo_path="$1"
     git -C "$repo_path" diff --quiet 2>/dev/null && \
     git -C "$repo_path" diff --cached --quiet 2>/dev/null
 }
 
-get_current_branch() {
+repo_get_current_branch() {
     local repo_path="$1"
     git -C "$repo_path" rev-parse --abbrev-ref HEAD 2>/dev/null
 }
 
-has_upstream() {
+repo_has_upstream() {
     local repo_path="$1"
     git -C "$repo_path" rev-parse --abbrev-ref @{u} >/dev/null 2>&1
-}
-
-is_main_branch() {
-    local branch="$1"
-    [[ "$branch" =~ ^(master|main)$ ]]
 }
 
 #
@@ -147,19 +121,19 @@ process_repo() {
     local pulled="no"
 
     # Fetch (discard output, we only care about success/failure)
-    if ! git_fetch "$repo_path" "$timeout_seconds" >/dev/null 2>&1; then
+    if ! repo_git_fetch "$repo_path" "$timeout_seconds" >/dev/null 2>&1; then
         status="fetch-failed"
     fi
 
     # Pull if appropriate
     local current_branch=""
     if [[ "$status" == "ok" ]]; then
-        if ! current_branch=$(get_current_branch "$repo_path"); then
+        if ! current_branch=$(repo_get_current_branch "$repo_path"); then
             status="empty-repo"
         elif is_main_branch "$current_branch"; then
-            if is_working_tree_clean "$repo_path"; then
-                if has_upstream "$repo_path"; then
-                    if git_pull "$repo_path" "$timeout_seconds" >/dev/null 2>&1; then
+            if repo_is_worktree_clean "$repo_path"; then
+                if repo_has_upstream "$repo_path"; then
+                    if repo_git_pull "$repo_path" "$timeout_seconds" >/dev/null 2>&1; then
                         pulled="yes"
                     else
                         status="pull-failed"
@@ -177,7 +151,7 @@ process_repo() {
 
     # Update progress counter
     local current
-    current=$(increment_progress "$progress_file")
+    current=$(increment_progress_counter "$progress_file")
 
     # Output result
     print_result "$current" "$total" "$status" "$pulled" "$repo_path" "$current_branch"
@@ -194,23 +168,23 @@ print_result() {
     local color suffix
     case "$status" in
         ok)
-            color="\033[32m"
+            color="$COLOR_GREEN"
             if [[ "$pulled" == "yes" ]]; then
                 suffix="fetched + pulled"
             else
                 suffix="fetched"
             fi
             ;;
-        fetch-failed)  color="\033[31m"; suffix="fetch failed/timeout" ;;
-        pull-failed)   color="\033[31m"; suffix="pull failed/timeout" ;;
-        empty-repo)    color="\033[33m"; suffix="empty repository" ;;
-        no-upstream)   color="\033[33m"; suffix="no tracking branch" ;;
-        dirty)         color="\033[33m"; suffix="skipped: dirty, $current_branch is checked out" ;;
-        not-main)      color="\033[33m"; suffix="skipped: not main, $current_branch is checked out" ;;
-        *)             color="\033[0m";  suffix="unknown" ;;
+        fetch-failed)  color="$COLOR_RED";    suffix="fetch failed/timeout" ;;
+        pull-failed)   color="$COLOR_RED";    suffix="pull failed/timeout" ;;
+        empty-repo)    color="$COLOR_YELLOW"; suffix="empty repository" ;;
+        no-upstream)   color="$COLOR_YELLOW"; suffix="no tracking branch" ;;
+        dirty)         color="$COLOR_YELLOW"; suffix="skipped: dirty, $current_branch is checked out" ;;
+        not-main)      color="$COLOR_YELLOW"; suffix="skipped: not main, $current_branch is checked out" ;;
+        *)             color="$COLOR_RESET";  suffix="unknown" ;;
     esac
 
-    echo -e "${color}[$current/$total] ($suffix)\033[0m $repo_path"
+    echo -e "${color}[$current/$total] ($suffix)${COLOR_RESET} $repo_path"
 }
 
 #
@@ -231,8 +205,7 @@ main() {
 
     local repo_list
     if ! repo_list=$(find_repos "$start_dir"); then
-        echo "Failed to scan for repositories"
-        exit 1
+        die "Failed to scan for repositories"
     fi
 
     if [[ -z "$repo_list" ]]; then
@@ -250,8 +223,9 @@ main() {
     echo "0" > "$PROGRESS_FILE"
 
     # Export functions for xargs subshells
-    export -f process_repo print_result increment_progress
-    export -f git_fetch git_pull is_working_tree_clean get_current_branch has_upstream is_main_branch
+    export -f process_repo print_result increment_progress_counter is_main_branch
+    export -f repo_git_fetch repo_git_pull repo_is_worktree_clean repo_get_current_branch repo_has_upstream
+    export COLOR_RED COLOR_GREEN COLOR_YELLOW COLOR_RESET
 
     # Process repositories in parallel
     printf '%s\n' "$repo_list" | xargs -I {} -P "$MAX_JOBS" \

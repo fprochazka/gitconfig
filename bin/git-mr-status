@@ -1,102 +1,204 @@
-#!/bin/bash
-# Show MR/PR status for the current branch (works with both GitHub and GitLab)
+#!/usr/bin/env bash
 
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
 
-# Get the current branch (only used for error messages and GitLab)
-current_branch=$(git branch --show-current)
-explicit_branch="$1"
+#
+# Usage
+#
 
-# Detect the remote provider
-provider=$(git remote-host-provider 2>/dev/null || echo "unknown")
+usage() {
+    cat <<EOF
+Usage: git mr-status [BRANCH]
 
-case "$provider" in
-    github)
-        # gh pr view without branch arg auto-detects fork PRs correctly
-        if [[ -n "$explicit_branch" ]]; then
-            json=$(gh pr view "$explicit_branch" --json url,title,body,state,statusCheckRollup,headRefName,baseRefName,isCrossRepository,headRepositoryOwner 2>&1)
-        else
-            json=$(gh pr view --json url,title,body,state,statusCheckRollup,headRefName,baseRefName,isCrossRepository,headRepositoryOwner 2>&1)
-        fi || {
-            echo "No pull request found for branch '${explicit_branch:-$current_branch}'"
-            exit 0
-        }
+Show MR/PR status for the current branch (works with both GitHub and GitLab).
 
-        url=$(echo "$json" | jq -r '.url')
-        title=$(echo "$json" | jq -r '.title')
-        body=$(echo "$json" | jq -r '.body')
-        state=$(echo "$json" | jq -r '.state')
-        source_branch=$(echo "$json" | jq -r '.headRefName')
-        target_branch=$(echo "$json" | jq -r '.baseRefName')
-        is_cross_repo=$(echo "$json" | jq -r '.isCrossRepository')
-        ci_status=$(echo "$json" | jq -r '(.statusCheckRollup // []) | map(.conclusion // .status) | unique | join(", ")' 2>/dev/null || echo "n/a")
+Arguments:
+  BRANCH    Optional branch name (default: current branch)
 
-        # Format branch display with repo prefixes for cross-repo PRs
-        if [[ "$is_cross_repo" == "true" ]]; then
-            head_owner=$(echo "$json" | jq -r '.headRepositoryOwner.login')
-            # Extract base owner from URL (e.g., https://github.com/owner/repo/pull/123)
-            base_owner=$(echo "$url" | sed -E 's|https://github.com/([^/]+)/.*|\1|')
-            branch_display="${head_owner}:${source_branch} → ${base_owner}:${target_branch}"
-        else
-            branch_display="$source_branch → $target_branch"
-        fi
+Options:
+  -h, --help    Show this help message
+EOF
+    exit 0
+}
 
-        echo "URL:    $url"
-        echo "Title:  $title"
-        echo "Branch: $branch_display"
-        echo "State:  $state"
-        echo "CI:     ${ci_status:-n/a}"
-        if [[ -n "$body" && "$body" != "null" ]]; then
-            echo ""
-            echo "Description:"
-            echo "$body"
-        fi
-        ;;
+#
+# Output formatting
+#
 
-    gitlab)
-        # glab mr view without branch arg also works for current branch
-        if [[ -n "$explicit_branch" ]]; then
-            json=$(glab mr view "$explicit_branch" -F json 2>&1)
-        else
-            json=$(glab mr view -F json 2>&1)
-        fi || {
-            echo "No merge request found for branch '${explicit_branch:-$current_branch}'"
-            exit 0
-        }
+print_mr_info() {
+    local url="$1"
+    local title="$2"
+    local branch_display="$3"
+    local state="$4"
+    local ci_status="$5"
+    local body="$6"
 
-        url=$(echo "$json" | jq -r '.web_url')
-        title=$(echo "$json" | jq -r '.title')
-        body=$(echo "$json" | jq -r '.description')
-        state=$(echo "$json" | jq -r '.state')
-        source_branch=$(echo "$json" | jq -r '.source_branch')
-        target_branch=$(echo "$json" | jq -r '.target_branch')
-        source_project_id=$(echo "$json" | jq -r '.source_project_id')
-        target_project_id=$(echo "$json" | jq -r '.target_project_id')
-        ci_status=$(echo "$json" | jq -r '.pipeline.status // "n/a"')
+    echo "URL:    $url"
+    echo "Title:  $title"
+    echo "Branch: $branch_display"
+    echo "State:  $state"
+    echo "CI:     ${ci_status:-n/a}"
 
-        # Format branch display with repo prefixes for cross-repo MRs
-        if [[ "$source_project_id" != "$target_project_id" ]]; then
-            source_project=$(glab api "projects/$source_project_id" 2>/dev/null | jq -r '.path_with_namespace')
-            target_project=$(glab api "projects/$target_project_id" 2>/dev/null | jq -r '.path_with_namespace')
-            branch_display="${source_project}:${source_branch} → ${target_project}:${target_branch}"
-        else
-            branch_display="$source_branch → $target_branch"
-        fi
+    if [[ -n "$body" && "$body" != "null" && "$body" != "" ]]; then
+        echo ""
+        echo "Description:"
+        echo "$body"
+    fi
+}
 
-        echo "URL:    $url"
-        echo "Title:  $title"
-        echo "Branch: $branch_display"
-        echo "State:  $state"
-        echo "CI:     $ci_status"
-        if [[ -n "$body" && "$body" != "null" && "$body" != "" ]]; then
-            echo ""
-            echo "Description:"
-            echo "$body"
-        fi
-        ;;
+#
+# GitHub PR handling
+#
 
-    *)
-        echo "error: could not detect remote provider (github/gitlab)" >&2
-        exit 1
-        ;;
-esac
+fetch_github_pr() {
+    local branch="$1"
+    local json
+
+    if [[ -n "$branch" ]]; then
+        json=$(gh pr view "$branch" --json url,title,body,state,statusCheckRollup,headRefName,baseRefName,isCrossRepository,headRepositoryOwner 2>&1)
+    else
+        json=$(gh pr view --json url,title,body,state,statusCheckRollup,headRefName,baseRefName,isCrossRepository,headRepositoryOwner 2>&1)
+    fi || return 1
+
+    echo "$json"
+}
+
+format_github_branch_display() {
+    local json="$1"
+
+    local source_branch
+    local target_branch
+    local is_cross_repo
+    source_branch=$(json_field "$json" '.headRefName')
+    target_branch=$(json_field "$json" '.baseRefName')
+    is_cross_repo=$(json_field "$json" '.isCrossRepository')
+
+    if [[ "$is_cross_repo" == "true" ]]; then
+        local head_owner
+        local base_owner
+        local url
+        head_owner=$(json_field "$json" '.headRepositoryOwner.login')
+        url=$(json_field "$json" '.url')
+        base_owner=$(echo "$url" | sed -E 's|https://github.com/([^/]+)/.*|\1|')
+        echo "${head_owner}:${source_branch} → ${base_owner}:${target_branch}"
+    else
+        echo "$source_branch → $target_branch"
+    fi
+}
+
+show_github_pr() {
+    local explicit_branch="$1"
+    local current_branch="$2"
+
+    local json
+    if ! json=$(fetch_github_pr "$explicit_branch"); then
+        echo "No pull request found for branch '${explicit_branch:-$current_branch}'"
+        exit 0
+    fi
+
+    local url title body state ci_status branch_display
+    url=$(json_field "$json" '.url')
+    title=$(json_field "$json" '.title')
+    body=$(json_field "$json" '.body')
+    state=$(json_field "$json" '.state')
+    ci_status=$(echo "$json" | jq -r '(.statusCheckRollup // []) | map(.conclusion // .status) | unique | join(", ")' 2>/dev/null || echo "n/a")
+    branch_display=$(format_github_branch_display "$json")
+
+    print_mr_info "$url" "$title" "$branch_display" "$state" "$ci_status" "$body"
+}
+
+#
+# GitLab MR handling
+#
+
+fetch_gitlab_mr() {
+    local branch="$1"
+    local json
+
+    if [[ -n "$branch" ]]; then
+        json=$(glab mr view "$branch" -F json 2>&1)
+    else
+        json=$(glab mr view -F json 2>&1)
+    fi || return 1
+
+    echo "$json"
+}
+
+format_gitlab_branch_display() {
+    local json="$1"
+
+    local source_branch
+    local target_branch
+    local source_project_id
+    local target_project_id
+    source_branch=$(json_field "$json" '.source_branch')
+    target_branch=$(json_field "$json" '.target_branch')
+    source_project_id=$(json_field "$json" '.source_project_id')
+    target_project_id=$(json_field "$json" '.target_project_id')
+
+    if [[ "$source_project_id" != "$target_project_id" ]]; then
+        local source_project
+        local target_project
+        source_project=$(glab api "projects/$source_project_id" 2>/dev/null | jq -r '.path_with_namespace')
+        target_project=$(glab api "projects/$target_project_id" 2>/dev/null | jq -r '.path_with_namespace')
+        echo "${source_project}:${source_branch} → ${target_project}:${target_branch}"
+    else
+        echo "$source_branch → $target_branch"
+    fi
+}
+
+show_gitlab_mr() {
+    local explicit_branch="$1"
+    local current_branch="$2"
+
+    local json
+    if ! json=$(fetch_gitlab_mr "$explicit_branch"); then
+        echo "No merge request found for branch '${explicit_branch:-$current_branch}'"
+        exit 0
+    fi
+
+    local url title body state ci_status branch_display
+    url=$(json_field "$json" '.web_url')
+    title=$(json_field "$json" '.title')
+    body=$(json_field "$json" '.description')
+    state=$(json_field "$json" '.state')
+    ci_status=$(json_field "$json" '.pipeline.status // "n/a"')
+    branch_display=$(format_gitlab_branch_display "$json")
+
+    print_mr_info "$url" "$title" "$branch_display" "$state" "$ci_status" "$body"
+}
+
+#
+# Main
+#
+
+main() {
+    if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+        usage
+    fi
+
+    require_git_repo
+
+    local current_branch
+    current_branch=$(git branch --show-current)
+
+    local explicit_branch="${1:-}"
+
+    local provider
+    provider=$(git remote-host-provider 2>/dev/null || echo "unknown")
+
+    case "$provider" in
+        github)
+            show_github_pr "$explicit_branch" "$current_branch"
+            ;;
+        gitlab)
+            show_gitlab_mr "$explicit_branch" "$current_branch"
+            ;;
+        *)
+            die "Could not detect remote provider (github/gitlab)"
+            ;;
+    esac
+}
+
+main "$@"
