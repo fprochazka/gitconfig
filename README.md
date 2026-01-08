@@ -83,3 +83,25 @@ This gitconfig provides many custom git commands and aliases for enhanced produc
 ### Other aliases & shortcuts
 
 See [config/aliases.gitconfig](https://github.com/fprochazka/gitconfig/blob/master/config/aliases.gitconfig)
+
+## Development
+
+### Linting
+
+Run `shellcheck` on all scripts:
+
+```bash
+make lint        # Check with warning severity
+make lint-all    # Check with style severity (stricter)
+```
+
+### Testing
+
+```bash
+make test        # Bash syntax check on all scripts
+make test-help   # Verify all scripts respond to --help
+```
+
+### Requirements
+
+- [shellcheck](https://github.com/koalaman/shellcheck) - Install via `apt install shellcheck` or `brew install shellcheck`

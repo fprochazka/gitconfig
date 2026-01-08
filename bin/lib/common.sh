@@ -112,7 +112,7 @@ is_main_branch() {
 # Usage: has_upstream ["branch_name"]
 has_upstream() {
     local branch="${1:-HEAD}"
-    git rev-parse --abbrev-ref "${branch}@{u}" >/dev/null 2>&1
+    git rev-parse --abbrev-ref "${branch}"'@{u}' >/dev/null 2>&1
 }
 
 # Get the remote name for a branch

@@ -104,7 +104,7 @@ repo_get_current_branch() {
 
 repo_has_upstream() {
     local repo_path="$1"
-    git -C "$repo_path" rev-parse --abbrev-ref @{u} >/dev/null 2>&1
+    git -C "$repo_path" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1
 }
 
 #
