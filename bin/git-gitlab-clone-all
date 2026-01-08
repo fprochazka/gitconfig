@@ -72,7 +72,7 @@ gitlab_api() {
     local endpoint="$1"
     local url="https://${HOST}/api/v4/${endpoint}"
 
-    curl -s -H "PRIVATE-TOKEN: $TOKEN" "$url"
+    curl -s --connect-timeout 30 --max-time 120 -H "PRIVATE-TOKEN: $TOKEN" "$url"
 }
 
 url_encode() {
@@ -86,7 +86,7 @@ url_encode() {
 get_all_projects() {
     local page=1
     local per_page=100
-    local all_projects=""
+    local all_projects="[]"
     local encoded_group
     encoded_group=$(url_encode "$GROUP")
 
@@ -97,17 +97,19 @@ get_all_projects() {
         local projects
         projects=$(gitlab_api "$endpoint")
 
+        # Check if response is an array (not an error object)
+        if ! echo "$projects" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            die "API error: $(echo "$projects" | jq -r '.message // .error // "Unknown error"')"
+        fi
+
         # Check if we got any projects
-        if [[ $(echo "$projects" | jq '. | length') -eq 0 ]]; then
+        local count
+        count=$(echo "$projects" | jq 'length')
+        if [[ "$count" -eq 0 ]]; then
             break
         fi
 
-        if [[ -z "$all_projects" ]]; then
-            all_projects="$projects"
-        else
-            all_projects=$(echo "$all_projects" "$projects" | jq -s 'add')
-        fi
-
+        all_projects=$(echo "$all_projects" "$projects" | jq -s 'add')
         ((page++))
     done
 
@@ -129,7 +131,9 @@ verify_group_exists() {
         die "Group '$GROUP' not found or not accessible."
     fi
 
-    echo "Group found: $(json_field "$group_info" '.full_name // .name')"
+    local group_name
+    group_name=$(echo "$group_info" | jq -r '.full_name // .full_path // .name // "unknown"')
+    echo "Group found: $group_name"
 }
 
 #
