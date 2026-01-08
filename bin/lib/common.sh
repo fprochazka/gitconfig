@@ -184,3 +184,9 @@ json_field() {
     local field="$2"
     echo "$json" | jq -r "$field"
 }
+
+# URL encode a string
+# Usage: url_encode "path/with spaces"
+url_encode() {
+    printf '%s' "$1" | jq -sRr @uri
+}
