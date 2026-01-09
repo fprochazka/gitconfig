@@ -187,7 +187,7 @@ _gitlab_mr_create() {
     local title="$1"
 
     print_bold "Creating GitLab merge request..."
-    glab mr create --push --draft --remove-source-branch --assignee '@me' --title "$title" --yes
+    glab mr create --push --draft --remove-source-branch --assignee '@me' --title "$title" --description '' --yes
 }
 
 _gitlab_mr_view() {
@@ -251,7 +251,7 @@ _github_pr_create() {
     fi
 
     print_bold "Creating GitHub pull request..."
-    gh pr create --draft --assignee '@me' --title "$title"
+    gh pr create --draft --assignee '@me' --title "$title" --body ''
 }
 
 _github_pr_view() {
