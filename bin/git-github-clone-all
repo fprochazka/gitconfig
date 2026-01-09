@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+#
+# Usage
+#
+
+usage() {
+    cat <<EOF
+Usage: git github-clone-all --org=ORG_NAME
+       git github-clone-all --user=USER_NAME
+
+Clone all repositories from a GitHub organization or user.
+
+Repositories are cloned into <org>/<repo-name> subdirectories.
+If a wiki exists for a repository, it is also cloned as <org>/<repo-name>.wiki
+
+Requires: gh CLI authenticated with GitHub.
+  Run: gh auth login
+
+Options:
+  --org=ORG_NAME    GitHub organization name to clone repositories from
+  --user=USER_NAME  GitHub user name to clone repositories from
+  -h, --help        Show this help message
+
+Examples:
+  git github-clone-all --org=JavaMoney
+  git github-clone-all --user=torvalds
+EOF
+    exit 0
+}
+
+#
+# Argument parsing
+#
+
+parse_args() {
+    ORG=""
+    USER=""
+
+    for arg in "$@"; do
+        case $arg in
+            --org=*)
+                ORG="${arg#*=}"
+                ;;
+            --user=*)
+                USER="${arg#*=}"
+                ;;
+            -h|--help)
+                usage
+                ;;
+            *)
+                die "Unknown option: $arg"
+                ;;
+        esac
+    done
+
+    # Validate: exactly one of --org or --user must be provided
+    if [[ -n "$ORG" ]] && [[ -n "$USER" ]]; then
+        die "Cannot specify both --org and --user"
+    fi
+
+    if [[ -z "$ORG" ]] && [[ -z "$USER" ]]; then
+        die "Either --org or --user is required"
+    fi
+
+    # Set NAME and TYPE for use in API calls
+    if [[ -n "$ORG" ]]; then
+        NAME=$(echo -n "$ORG" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        TYPE="org"
+    else
+        NAME=$(echo -n "$USER" | tr -d '\n\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        TYPE="user"
+    fi
+}
+
+#
+# GitHub API via gh
+#
+
+verify_gh_auth() {
+    if ! gh auth status >/dev/null 2>&1; then
+        die "Not authenticated with GitHub. Run: gh auth login"
+    fi
+}
+
+#
+# Repository discovery
+#
+
+get_all_repos() {
+    echo "Fetching repositories from GitHub API..." >&2
+
+    local repos endpoint
+    if [[ "$TYPE" == "org" ]]; then
+        endpoint="orgs/${NAME}/repos?per_page=100&type=all"
+    else
+        endpoint="users/${NAME}/repos?per_page=100&type=all"
+    fi
+
+    if ! repos=$(gh api --paginate "$endpoint" 2>&1 | jq -s 'add // []'); then
+        die "Failed to fetch repositories: $repos"
+    fi
+
+    # Check if response is an array (not an error object)
+    if ! echo "$repos" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        die "API error: $(echo "$repos" | jq -r '.message // .error // "Unknown error"')"
+    fi
+
+    echo "$repos"
+}
+
+verify_target_exists() {
+    local info endpoint label
+
+    if [[ "$TYPE" == "org" ]]; then
+        endpoint="orgs/${NAME}"
+        label="Organization"
+    else
+        endpoint="users/${NAME}"
+        label="User"
+    fi
+
+    if info=$(gh api "$endpoint" 2>/dev/null); then
+        local display_name
+        display_name=$(echo "$info" | jq -r '.name // .login')
+        echo "$label found: $display_name"
+        return 0
+    fi
+
+    die "$label '$NAME' not found or not accessible."
+}
+
+#
+# Clone operations
+#
+
+clone_repo() {
+    local ssh_url="$1"
+    local repo_name="$2"
+    local has_wiki="$3"
+
+    local target_path="${NAME}/${repo_name}"
+
+    # Create directory if it doesn't exist
+    mkdir -p "$NAME"
+
+    if [[ -d "$target_path" ]]; then
+        print_yellow "  Directory already exists, skipping: $target_path"
+    else
+        echo "  Cloning: $ssh_url -> $target_path"
+        if git clone "$ssh_url" "$target_path"; then
+            print_green "  Successfully cloned: $target_path"
+        else
+            print_red "  Failed to clone: $target_path"
+        fi
+    fi
+
+    # Clone wiki if it exists
+    if [[ "$has_wiki" == "true" ]]; then
+        clone_wiki "$repo_name"
+    fi
+}
+
+clone_wiki() {
+    local repo_name="$1"
+    local wiki_path="${NAME}/${repo_name}.wiki"
+    local wiki_url="git@github.com:${NAME}/${repo_name}.wiki.git"
+
+    if [[ -d "$wiki_path" ]]; then
+        print_yellow "  Wiki directory already exists, skipping: $wiki_path"
+        return 0
+    fi
+
+    echo "  Checking wiki: $wiki_url"
+
+    # Test if wiki actually exists (has_wiki can be true even without content)
+    if git ls-remote "$wiki_url" >/dev/null 2>&1; then
+        echo "  Cloning wiki: $wiki_url -> $wiki_path"
+        if git clone "$wiki_url" "$wiki_path"; then
+            print_green "  Successfully cloned wiki: $wiki_path"
+        else
+            print_red "  Failed to clone wiki: $wiki_path"
+        fi
+    else
+        print_yellow "  Wiki enabled but empty or not accessible: $repo_name"
+    fi
+}
+
+#
+# Main
+#
+
+main() {
+    parse_args "$@"
+
+    echo "GitHub Clone All Repositories"
+    if [[ "$TYPE" == "org" ]]; then
+        echo "Organization: $NAME"
+    else
+        echo "User: $NAME"
+    fi
+    echo ""
+
+    echo "Verifying gh authentication..."
+    verify_gh_auth
+    echo ""
+
+    echo "Verifying ${TYPE} exists..."
+    verify_target_exists
+    echo ""
+
+    echo "Fetching repositories from GitHub..."
+    local repos
+    repos=$(get_all_repos)
+
+    if [[ -z "$repos" ]] || [[ "$repos" == "null" ]] || [[ $(echo "$repos" | jq '. | length') -eq 0 ]]; then
+        echo "No repositories found."
+        exit 0
+    fi
+
+    # Filter out archived repos
+    repos=$(echo "$repos" | jq '[.[] | select(.archived == false)]')
+
+    local repo_count
+    repo_count=$(echo "$repos" | jq '. | length')
+    echo "Found $repo_count repositories to clone"
+    echo ""
+
+    # Process each repository
+    echo "$repos" | jq -r '.[] | "\(.ssh_url)|\(.name)|\(.has_wiki)"' | while IFS='|' read -r ssh_url repo_name has_wiki; do
+        clone_repo "$ssh_url" "$repo_name" "$has_wiki"
+    done
+
+    echo ""
+    print_green "GitHub clone operation completed!"
+}
+
+main "$@"
