@@ -75,3 +75,6 @@
 	# issue tracking integration (Linear, etc.)
 	issue-branch = !~/.config/gitconfig/bin/git-issue-branch
 	issue-mr = !~/.config/gitconfig/bin/git-issue-mr
+
+	# worktree management
+	worktree-cleanup = !~/.config/gitconfig/bin/git-worktree-cleanup

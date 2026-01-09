@@ -106,7 +106,9 @@ This gitconfig provides many custom git commands and aliases for enhanced produc
 
 ### Issue Tracking Integration
 - **`git issue-branch <issue-id>`** - Create or checkout a branch for an issue (e.g., `fp/ENG-123-fix-login-bug`)
+- **`git issue-branch -w <issue-id>`** - Same as above but creates a git worktree at `<project>-worktrees/<branch-dir>`
 - **`git issue-mr [issue-id]`** - Push branch and create GitLab MR / GitHub PR with issue title
+- **`git worktree-cleanup`** - Interactive worktree removal with branch info (upstream status, commit message)
 
 These commands integrate with issue tracking systems (currently Linear) to:
 - Fetch issue title for branch naming and MR/PR titles

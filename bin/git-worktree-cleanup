@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+#
+# git-worktree-cleanup - Interactively remove git worktrees
+#
+# Usage: git worktree-cleanup
+#
+# Lists all worktrees (excluding the main repository directory) with rich
+# branch information, then prompts for selection to remove.
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+show_help() {
+    cat << 'EOF'
+Usage: git worktree-cleanup
+
+Interactively remove git worktrees.
+
+Displays a numbered list of all worktrees (excluding the main repository)
+with branch information including:
+  - Branch name
+  - Commit hash
+  - Upstream tracking status (ahead/behind)
+  - Last commit message
+
+Select a number to remove that worktree, or press Ctrl+C to cancel.
+
+Examples:
+    git worktree-cleanup
+EOF
+}
+
+# Get formatted branch info for a worktree
+# Usage: get_worktree_branch_info <branch_name>
+get_worktree_branch_info() {
+    local branch="$1"
+    local commit_hash
+    local commit_msg
+    local upstream_info=""
+
+    # Get short commit hash
+    commit_hash=$(git rev-parse --short "$branch" 2>/dev/null || echo "??????")
+
+    # Get first line of commit message
+    commit_msg=$(git log -1 --format='%s' "$branch" 2>/dev/null | head -c 60 || echo "")
+
+    # Get upstream tracking info
+    local upstream
+    if upstream=$(git rev-parse --abbrev-ref "${branch}@{upstream}" 2>/dev/null); then
+        local ahead behind
+        ahead=$(git rev-list --count "${upstream}..${branch}" 2>/dev/null || echo 0)
+        behind=$(git rev-list --count "${branch}..${upstream}" 2>/dev/null || echo 0)
+
+        if [[ "$ahead" -gt 0 ]] && [[ "$behind" -gt 0 ]]; then
+            upstream_info="${COLOR_YELLOW}[${upstream}: ahead ${ahead}, behind ${behind}]${COLOR_RESET}"
+        elif [[ "$ahead" -gt 0 ]]; then
+            upstream_info="${COLOR_GREEN}[${upstream}: ahead ${ahead}]${COLOR_RESET}"
+        elif [[ "$behind" -gt 0 ]]; then
+            upstream_info="${COLOR_RED}[${upstream}: behind ${behind}]${COLOR_RESET}"
+        else
+            upstream_info="[${upstream}]"
+        fi
+    fi
+
+    echo -e "${COLOR_GREEN}${branch}${COLOR_RESET} ${commit_hash} ${upstream_info} ${commit_msg}"
+}
+
+main() {
+    # Handle --help
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        show_help
+        exit 0
+    fi
+
+    require_git_repo
+
+    local main_worktree
+    main_worktree=$(git rev-parse --show-toplevel)
+
+    # Collect worktrees (excluding main)
+    local -a worktree_paths=()
+    local -a worktree_branches=()
+
+    local current_path=""
+    local skip_current=false
+
+    while IFS= read -r line; do
+        # Parse worktree list --porcelain output
+        if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+            current_path="${BASH_REMATCH[1]}"
+            # Skip main worktree
+            if [[ "$current_path" == "$main_worktree" ]]; then
+                skip_current=true
+            else
+                skip_current=false
+                worktree_paths+=("$current_path")
+            fi
+        elif [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
+            if [[ "$skip_current" == false ]]; then
+                local branch="${BASH_REMATCH[1]}"
+                worktree_branches+=("$branch")
+            fi
+        elif [[ "$line" =~ ^HEAD\ [0-9a-f]+$ ]] && [[ "$skip_current" == false ]] && [[ -z "${worktree_branches[${#worktree_paths[@]}-1]:-}" ]]; then
+            # Detached HEAD - no branch line will follow, add placeholder
+            :
+        elif [[ -z "$line" ]]; then
+            # Empty line separates worktree entries
+            # If we added a path but no branch yet, it's detached
+            if [[ "$skip_current" == false ]] && [[ ${#worktree_paths[@]} -gt ${#worktree_branches[@]} ]]; then
+                worktree_branches+=("detached")
+            fi
+        fi
+    done < <(git worktree list --porcelain)
+
+    # Handle last entry if no trailing newline
+    if [[ ${#worktree_paths[@]} -gt ${#worktree_branches[@]} ]]; then
+        worktree_branches+=("detached")
+    fi
+
+    # Check if we have any worktrees to clean up
+    if [[ ${#worktree_paths[@]} -eq 0 ]]; then
+        echo "No worktrees to clean up (only the main repository exists)."
+        exit 0
+    fi
+
+    # Build display list
+    echo ""
+    print_bold "Worktrees:"
+    echo ""
+
+    for i in "${!worktree_paths[@]}"; do
+        local path="${worktree_paths[$i]}"
+        local branch="${worktree_branches[$i]:-detached}"
+        local num=$((i + 1))
+
+        local info
+        if [[ "$branch" != "detached" ]]; then
+            info=$(get_worktree_branch_info "$branch")
+        else
+            info="${COLOR_YELLOW}(detached HEAD)${COLOR_RESET}"
+        fi
+
+        printf "  %2d) %s\n" "$num" "$info"
+        printf "      ${COLOR_BOLD}%s${COLOR_RESET}\n" "$path"
+        echo ""
+    done
+
+    # Prompt for selection
+    local selection
+    echo -n "Enter number to remove (Ctrl+C to cancel): "
+    read -r selection
+
+    # Validate selection
+    if ! [[ "$selection" =~ ^[0-9]+$ ]]; then
+        die "Invalid selection: $selection"
+    fi
+
+    local index=$((selection - 1))
+    if [[ $index -lt 0 ]] || [[ $index -ge ${#worktree_paths[@]} ]]; then
+        die "Selection out of range: $selection"
+    fi
+
+    local selected_path="${worktree_paths[$index]}"
+    local selected_branch="${worktree_branches[$index]:-detached}"
+
+    echo ""
+    print_yellow "Removing worktree: $selected_path"
+
+    # Remove the worktree
+    git worktree remove "$selected_path"
+
+    print_green "Worktree removed successfully."
+
+    # Optionally delete the branch if it exists
+    if [[ "$selected_branch" != "detached" ]]; then
+        local main_branch
+        main_branch=$(get_main_branch)
+
+        # Check if branch is merged into main
+        if git branch --merged "$main_branch" | grep -q "^\s*${selected_branch}$"; then
+            # Auto-delete merged branches
+            git branch -d "$selected_branch"
+            print_green "Branch '$selected_branch' deleted (was merged into $main_branch)."
+        else
+            # Ask for unmerged branches
+            echo ""
+            echo -n "Also delete unmerged branch '$selected_branch'? [y/N]: "
+            read -r delete_branch
+            if [[ "$delete_branch" =~ ^[Yy]$ ]]; then
+                git branch -D "$selected_branch"
+                print_green "Branch '$selected_branch' deleted."
+            fi
+        fi
+    fi
+}
+
+main "$@"

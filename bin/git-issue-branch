@@ -2,7 +2,10 @@
 #
 # git-issue-branch - Create or checkout a branch for an issue
 #
-# Usage: git issue-branch <issue-id>
+# Usage: git issue-branch [options] <issue-id>
+#
+# Options:
+#   -w, --worktree-create   Create a git worktree for the branch
 #
 # If a branch for the issue already exists (by git config association or
 # branch name pattern), checks it out. Otherwise creates a new branch
@@ -22,20 +25,29 @@ source "${SCRIPT_DIR}/lib/issue-tracking.sh"
 
 show_help() {
     cat << 'EOF'
-Usage: git issue-branch <issue-id>
+Usage: git issue-branch [options] <issue-id>
 
 Create or checkout a branch for an issue from your issue tracking system.
 
 Arguments:
     issue-id    Issue identifier (e.g., "ENG-123")
 
+Options:
+    -w, --worktree-create   Create a git worktree for the branch
+                            Location: <project-dir>/../<project>-worktrees/<branch-dir>
+
 Behavior:
     - If a branch for this issue already exists, checks it out
     - Otherwise, fetches issue details and creates a new branch
+    - With -w, creates a worktree instead of checking out in current directory
 
 Branch naming convention:
     <user-initials>/<issue-id>-<sanitized-title>
     Example: fp/ENG-123-implement-user-authentication
+
+Worktree directory naming:
+    Branch slashes and special chars are replaced with dashes
+    Example: fp/ENG-123-feature -> fp-ENG-123-feature
 
 Configuration:
     git config --global issue-tracking.system linear
@@ -43,25 +55,46 @@ Configuration:
 
 Examples:
     git issue-branch ENG-123
-    git issue-branch PLAT-456
+    git issue-branch -w ENG-123
+    git issue-branch --worktree-create PLAT-456
 EOF
 }
 
 main() {
-    # Handle --help
-    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        show_help
-        exit 0
-    fi
+    local create_worktree=false
+    local issue_id=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -w|--worktree-create)
+                create_worktree=true
+                shift
+                ;;
+            -*)
+                die "Unknown option: $1\nTry 'git issue-branch --help' for more information."
+                ;;
+            *)
+                if [[ -z "$issue_id" ]]; then
+                    issue_id="$1"
+                else
+                    die "Unexpected argument: $1\nTry 'git issue-branch --help' for more information."
+                fi
+                shift
+                ;;
+        esac
+    done
 
     # Require issue ID argument
-    if [[ $# -lt 1 ]]; then
-        echo "Usage: git issue-branch <issue-id>" >&2
+    if [[ -z "$issue_id" ]]; then
+        echo "Usage: git issue-branch [options] <issue-id>" >&2
         echo "Try 'git issue-branch --help' for more information." >&2
         exit 1
     fi
-
-    local issue_id="$1"
 
     require_git_repo
 
@@ -69,7 +102,14 @@ main() {
     local existing_branch
     if existing_branch=$(issue_find_existing_branch "$issue_id"); then
         print_green "Found existing branch: $existing_branch"
-        git checkout "$existing_branch"
+        if [[ "$create_worktree" == true ]]; then
+            local worktree_path
+            worktree_path=$(create_worktree "$existing_branch")
+            echo ""
+            print_bold "cd $worktree_path"
+        else
+            git checkout "$existing_branch"
+        fi
         return 0
     fi
 
@@ -89,13 +129,29 @@ main() {
     local branch_name
     branch_name=$(issue_create_branch_name "$issue_json")
 
-    # Create and checkout the branch
-    git checkout -b "$branch_name"
+    if [[ "$create_worktree" == true ]]; then
+        # Create branch first (without checkout)
+        git branch "$branch_name"
 
-    # Store issue ID association in git config
-    issue_set_branch_issue_id "$identifier" "$branch_name"
+        # Store issue ID association in git config
+        issue_set_branch_issue_id "$identifier" "$branch_name"
 
-    print_green "Created branch: $branch_name"
+        # Create worktree
+        local worktree_path
+        worktree_path=$(create_worktree "$branch_name")
+
+        print_green "Created branch: $branch_name"
+        echo ""
+        print_bold "cd $worktree_path"
+    else
+        # Create and checkout the branch
+        git checkout -b "$branch_name"
+
+        # Store issue ID association in git config
+        issue_set_branch_issue_id "$identifier" "$branch_name"
+
+        print_green "Created branch: $branch_name"
+    fi
 }
 
 main "$@"

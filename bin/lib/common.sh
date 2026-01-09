@@ -190,3 +190,66 @@ json_field() {
 url_encode() {
     printf '%s' "$1" | jq -sRr @uri
 }
+
+#
+# Worktree helpers
+#
+
+# Sanitize a string for use as a directory name
+# Only allows alphanumeric chars and dashes, collapses repeats, trims edges
+# Usage: sanitize_worktree_dirname "fp/ENG-123-some-feature"
+# Returns: "fp-ENG-123-some-feature"
+sanitize_worktree_dirname() {
+    local text="$1"
+
+    echo "$text" \
+        | sed 's/[^a-zA-Z0-9-]/-/g' \
+        | sed 's/-\+/-/g' \
+        | sed 's/^-//' \
+        | sed 's/-$//'
+}
+
+# Get the worktrees directory path for a git repository
+# Usage: get_worktrees_dir [git_root_dir]
+# Returns: /path/to/project/../project-worktrees
+get_worktrees_dir() {
+    local git_root="${1:-$(git rev-parse --show-toplevel)}"
+    local project_basename
+    local parent_dir
+
+    project_basename=$(basename "$git_root")
+    parent_dir=$(dirname "$git_root")
+
+    echo "${parent_dir}/${project_basename}-worktrees"
+}
+
+# Create a worktree for a branch
+# Usage: create_worktree "branch-name" [git_root_dir]
+# Creates worktree at <project>-worktrees/<sanitized-branch-name>
+create_worktree() {
+    local branch_name="$1"
+    local git_root="${2:-$(git rev-parse --show-toplevel)}"
+    local worktrees_dir
+    local dirname
+    local worktree_path
+
+    worktrees_dir=$(get_worktrees_dir "$git_root")
+    dirname=$(sanitize_worktree_dirname "$branch_name")
+    worktree_path="${worktrees_dir}/${dirname}"
+
+    # Create worktrees directory if it doesn't exist
+    if [[ ! -d "$worktrees_dir" ]]; then
+        mkdir -p "$worktrees_dir"
+        print_green "Created worktrees directory: $worktrees_dir"
+    fi
+
+    # Check if worktree already exists
+    if [[ -d "$worktree_path" ]]; then
+        die "Worktree already exists: $worktree_path"
+    fi
+
+    # Create the worktree
+    git worktree add "$worktree_path" "$branch_name"
+
+    echo "$worktree_path"
+}
