@@ -68,6 +68,28 @@ issue_user_initials() {
     echo "$name" | awk '{for(i=1;i<=NF && i<=4;i++) printf tolower(substr($i,1,1))}'
 }
 
+# Remove common stop words that don't add meaning to branch names
+# Usage: issue_remove_stop_words "Add the ability to export data"
+# Returns: "Add ability export data"
+issue_remove_stop_words() {
+    local text="$1"
+
+    # High-confidence stop words:
+    # - Articles: a, an, the
+    # - Common prepositions: in, on, at, to, for, of, with, by, from, as
+    # - Conjunctions: and, or, but
+    # - Be verbs: is, are, was, were, be
+    # - Have verbs: has, have, had
+    # - Pronouns: it, its, this, that
+    local stop_words="a|an|the|in|on|at|to|for|of|with|by|from|as|and|or|but|is|are|was|were|be|has|have|had|it|its|this|that"
+
+    echo "$text" \
+        | sed -E "s/\b(${stop_words})\b//gi" \
+        | sed 's/  \+/ /g' \
+        | sed 's/^ //' \
+        | sed 's/ $//'
+}
+
 # Sanitize text for use in branch names
 # Usage: issue_sanitize_branch_name "Some Title with CAPS & special!"
 # Returns: "some-title-with-caps-special"
@@ -122,6 +144,7 @@ issue_create_branch_name() {
         return
     fi
 
+    title=$(issue_remove_stop_words "$title")
     sanitized_title=$(issue_sanitize_branch_name "$title")
     sanitized_title=$(issue_truncate "$sanitized_title" "$remaining_len")
 
