@@ -12,6 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/terminals.sh"
 
 show_help() {
     cat << 'EOF'
@@ -83,8 +84,7 @@ main() {
     local existing_worktree
     if existing_worktree=$(find_worktree_for_branch "$branch"); then
         print_green "Worktree already exists for branch: $branch"
-        echo ""
-        print_bold "cd $existing_worktree"
+        open_terminal_tab "$existing_worktree"
         exit 0
     fi
 
@@ -123,8 +123,7 @@ main() {
     local worktree_path
     worktree_path=$(create_worktree "$branch")
 
-    echo ""
-    print_bold "cd $worktree_path"
+    open_terminal_tab "$worktree_path"
 }
 
 main "$@"

@@ -21,6 +21,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/terminals.sh"
 source "${SCRIPT_DIR}/lib/issue-tracking.sh"
 
 show_help() {
@@ -110,8 +111,7 @@ main() {
             else
                 worktree_path=$(create_worktree "$existing_branch")
             fi
-            echo ""
-            print_bold "cd $worktree_path"
+            open_terminal_tab "$worktree_path"
         else
             git checkout "$existing_branch"
         fi
@@ -150,8 +150,7 @@ main() {
             worktree_path=$(create_worktree "$branch_name")
             print_green "Created branch: $branch_name"
         fi
-        echo ""
-        print_bold "cd $worktree_path"
+        open_terminal_tab "$worktree_path"
     else
         # Create and checkout the branch
         git checkout -b "$branch_name"
