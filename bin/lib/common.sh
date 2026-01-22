@@ -209,11 +209,19 @@ sanitize_worktree_dirname() {
         | sed 's/-$//'
 }
 
+# Get the main repository root (works from worktrees too)
+# Usage: get_main_repo_root
+# Returns: /path/to/main/repo (not the worktree path)
+get_main_repo_root() {
+    # First worktree listed is always the main repository
+    git worktree list --porcelain | head -1 | sed 's/^worktree //'
+}
+
 # Get the worktrees directory path for a git repository
 # Usage: get_worktrees_dir [git_root_dir]
 # Returns: /path/to/project/../project-worktrees
 get_worktrees_dir() {
-    local git_root="${1:-$(git rev-parse --show-toplevel)}"
+    local git_root="${1:-$(get_main_repo_root)}"
     local project_basename
     local parent_dir
 
@@ -223,12 +231,33 @@ get_worktrees_dir() {
     echo "${parent_dir}/${project_basename}-worktrees"
 }
 
+# Find existing worktree path for a branch
+# Usage: find_worktree_for_branch "branch-name"
+# Returns the path if found, exits with 1 otherwise
+find_worktree_for_branch() {
+    local branch="$1"
+    local worktree_path=""
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+            worktree_path="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^branch\ refs/heads/(.+)$ ]]; then
+            if [[ "${BASH_REMATCH[1]}" == "$branch" ]]; then
+                echo "$worktree_path"
+                return 0
+            fi
+        fi
+    done < <(git worktree list --porcelain)
+
+    return 1
+}
+
 # Create a worktree for a branch
 # Usage: create_worktree "branch-name" [git_root_dir]
 # Creates worktree at <project>-worktrees/<sanitized-branch-name>
 create_worktree() {
     local branch_name="$1"
-    local git_root="${2:-$(git rev-parse --show-toplevel)}"
+    local git_root="${2:-$(get_main_repo_root)}"
     local worktrees_dir
     local dirname
     local worktree_path

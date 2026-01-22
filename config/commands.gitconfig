@@ -78,4 +78,5 @@
 	issue-mr = !~/.config/gitconfig/bin/git-issue-mr
 
 	# worktree management
-	worktree-cleanup = !~/.config/gitconfig/bin/git-worktree-cleanup
+	wt = !~/.config/gitconfig/bin/git-worktree-checkout
+	wt-cleanup = !~/.config/gitconfig/bin/git-worktree-cleanup

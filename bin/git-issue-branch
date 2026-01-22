@@ -104,7 +104,12 @@ main() {
         print_green "Found existing branch: $existing_branch"
         if [[ "$create_worktree" == true ]]; then
             local worktree_path
-            worktree_path=$(create_worktree "$existing_branch")
+            # Check if worktree already exists
+            if worktree_path=$(find_worktree_for_branch "$existing_branch"); then
+                print_green "Worktree already exists"
+            else
+                worktree_path=$(create_worktree "$existing_branch")
+            fi
             echo ""
             print_bold "cd $worktree_path"
         else
@@ -136,11 +141,15 @@ main() {
         # Store issue ID association in git config
         issue_set_branch_issue_id "$identifier" "$branch_name"
 
-        # Create worktree
+        # Create worktree (check if one already exists first)
         local worktree_path
-        worktree_path=$(create_worktree "$branch_name")
-
-        print_green "Created branch: $branch_name"
+        if worktree_path=$(find_worktree_for_branch "$branch_name"); then
+            print_green "Created branch: $branch_name"
+            print_green "Worktree already exists"
+        else
+            worktree_path=$(create_worktree "$branch_name")
+            print_green "Created branch: $branch_name"
+        fi
         echo ""
         print_bold "cd $worktree_path"
     else

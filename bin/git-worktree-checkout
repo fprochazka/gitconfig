@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+#
+# git-worktree-checkout - Checkout branches into worktrees
+#
+# Usage: git wt [options] <branch>
+#
+# Works like checkout but with worktrees - creates a worktree for the branch
+# if it doesn't exist, or prints the path if it already does.
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+show_help() {
+    cat << 'EOF'
+Usage: git wt [options] <branch>
+
+Checkout branches into worktrees.
+
+Arguments:
+    branch      Branch name to checkout into a worktree
+
+Options:
+    -b          Create a new branch before creating the worktree
+
+Behavior:
+    - Does NOT touch the current working directory (safe with uncommitted changes)
+    - Works from both main repo and existing worktrees
+    - If a worktree for the branch already exists, prints its path
+    - Otherwise, creates a new worktree for the branch
+    - With -b, creates a new branch first (like git checkout -b)
+
+Worktree location:
+    <project-dir>/../<project>-worktrees/<sanitized-branch-name>
+
+Examples:
+    git wt fp/new-feature          # Checkout existing branch into worktree
+    git wt -b fp/another-feature   # Create new branch and worktree
+EOF
+}
+
+main() {
+    local create_branch=false
+    local branch=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -b)
+                create_branch=true
+                shift
+                ;;
+            -*)
+                die "Unknown option: $1\nTry 'git wt --help' for more information."
+                ;;
+            *)
+                if [[ -z "$branch" ]]; then
+                    branch="$1"
+                else
+                    die "Unexpected argument: $1\nTry 'git wt --help' for more information."
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Require branch argument
+    if [[ -z "$branch" ]]; then
+        echo "Usage: git wt [options] <branch>" >&2
+        echo "Try 'git wt --help' for more information." >&2
+        exit 1
+    fi
+
+    require_git_repo
+
+    # Check if worktree already exists for this branch
+    local existing_worktree
+    if existing_worktree=$(find_worktree_for_branch "$branch"); then
+        print_green "Worktree already exists for branch: $branch"
+        echo ""
+        print_bold "cd $existing_worktree"
+        exit 0
+    fi
+
+    if [[ "$create_branch" == true ]]; then
+        # Create new branch
+        if git show-ref --verify --quiet "refs/heads/$branch"; then
+            die "Branch '$branch' already exists. Use without -b to checkout existing branch."
+        fi
+        git branch "$branch"
+        print_green "Created branch: $branch"
+    else
+        # Verify branch exists locally
+        if ! git show-ref --verify --quiet "refs/heads/$branch"; then
+            # Check if it's a remote branch we can track (like git checkout does)
+            local -a matching_remotes=()
+            for remote in $(git remote); do
+                if git show-ref --verify --quiet "refs/remotes/${remote}/${branch}"; then
+                    matching_remotes+=("${remote}")
+                fi
+            done
+
+            if [[ ${#matching_remotes[@]} -eq 0 ]]; then
+                die "Branch '$branch' not found. Use -b to create a new branch."
+            elif [[ ${#matching_remotes[@]} -gt 1 ]]; then
+                die "Branch '$branch' exists on multiple remotes: ${matching_remotes[*]}\nUse 'git wt -b $branch' and set upstream manually."
+            else
+                # Exactly one remote has this branch - create tracking branch
+                local remote="${matching_remotes[0]}"
+                git branch --track "$branch" "${remote}/${branch}"
+                print_green "Branch '$branch' set up to track '${remote}/${branch}'"
+            fi
+        fi
+    fi
+
+    # Create the worktree
+    local worktree_path
+    worktree_path=$(create_worktree "$branch")
+
+    echo ""
+    print_bold "cd $worktree_path"
+}
+
+main "$@"
