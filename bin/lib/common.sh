@@ -277,8 +277,8 @@ create_worktree() {
         die "Worktree already exists: $worktree_path"
     fi
 
-    # Create the worktree
-    git worktree add "$worktree_path" "$branch_name"
+    # Create the worktree (redirect output to stderr so it doesn't mix with return value)
+    git worktree add "$worktree_path" "$branch_name" >&2
 
     echo "$worktree_path"
 }

@@ -78,23 +78,16 @@ open_terminal_tab() {
 _open_tab_guake() {
     local directory="$1"
 
-    # Use D-Bus for reliability
-    if command -v gdbus >/dev/null 2>&1; then
-        gdbus call --session \
-            --dest org.guake3.RemoteControl \
-            --object-path /org/guake3/RemoteControl \
-            --method org.guake3.RemoteControl.add_tab "$directory" >/dev/null 2>&1
-        gdbus call --session \
-            --dest org.guake3.RemoteControl \
-            --object-path /org/guake3/RemoteControl \
-            --method org.guake3.RemoteControl.show >/dev/null 2>&1
-    elif command -v guake >/dev/null 2>&1; then
-        # Fallback to CLI
-        guake -n "$directory"
-        guake --show
-    else
+    if ! command -v guake >/dev/null 2>&1; then
         return 1
     fi
+
+    # Open new tab and cd into directory
+    # The --new-tab parameter doesn't reliably set the working directory,
+    # so we open tab and execute cd command separately
+    guake --new-tab="" --show >/dev/null 2>&1
+    sleep 0.2
+    guake --execute-command="cd ${directory@Q}" >/dev/null 2>&1
 }
 
 _open_tab_tmux() {
