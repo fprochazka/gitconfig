@@ -36,6 +36,13 @@ open_terminal_tab() {
     terminal=$(detect_terminal)
 
     case "$terminal" in
+        guake|tmux|kitty|wezterm|gnome-terminal|konsole)
+            echo ""
+            print_green "Opening in new terminal tab: $directory"
+            ;;
+    esac
+
+    case "$terminal" in
         guake)
             _open_tab_guake "$directory"
             ;;
