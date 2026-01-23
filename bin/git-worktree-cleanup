@@ -15,21 +15,24 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
     cat << 'EOF'
-Usage: git worktree-cleanup
+Usage: git worktree-cleanup [-i|--interactive]
 
 Interactively remove git worktrees.
 
-Displays a numbered list of all worktrees (excluding the main repository)
-with branch information including:
+When run from within a worktree, offers to clean up that worktree directly.
+When run from the main repository (or with -i), displays a numbered list
+of all worktrees with branch information including:
   - Branch name
   - Commit hash
   - Upstream tracking status (ahead/behind)
   - Last commit message
 
-Select a number to remove that worktree, or press Ctrl+C to cancel.
+Options:
+    -i, --interactive   Force interactive selection even when in a worktree
 
 Examples:
-    git worktree-cleanup
+    git worktree-cleanup        # Clean current worktree, or list if in main repo
+    git worktree-cleanup -i     # Always show interactive list
 EOF
 }
 
@@ -68,17 +71,97 @@ get_worktree_branch_info() {
     echo -e "${COLOR_GREEN}${branch}${COLOR_RESET} ${commit_hash} ${upstream_info} ${commit_msg}"
 }
 
-main() {
-    # Handle --help
-    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        show_help
-        exit 0
+# Remove a worktree and optionally its branch
+# Usage: remove_worktree <path> <branch>
+remove_worktree() {
+    local selected_path="$1"
+    local selected_branch="$2"
+
+    print_yellow "Removing worktree: $selected_path"
+
+    # Remove the worktree
+    git worktree remove "$selected_path"
+
+    print_green "Worktree removed successfully."
+
+    # Optionally delete the branch if it exists
+    if [[ "$selected_branch" != "detached" ]]; then
+        local main_branch
+        main_branch=$(get_main_branch)
+
+        # Check if branch is merged into main
+        if git branch --merged "$main_branch" | grep -q "^\s*${selected_branch}$"; then
+            # Auto-delete merged branches
+            git branch -d "$selected_branch"
+            print_green "Branch '$selected_branch' deleted (was merged into $main_branch)."
+        else
+            # Ask for unmerged branches
+            echo ""
+            echo -n "Also delete unmerged branch '$selected_branch'? [y/N]: "
+            read -r delete_branch
+            if [[ "$delete_branch" =~ ^[Yy]$ ]]; then
+                git branch -D "$selected_branch"
+                print_green "Branch '$selected_branch' deleted."
+            fi
+        fi
     fi
+}
+
+main() {
+    local force_interactive=false
+
+    # Handle flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --interactive|-i)
+                force_interactive=true
+                shift
+                ;;
+            *)
+                die "Unknown option: $1"
+                ;;
+        esac
+    done
 
     require_git_repo
 
     local main_worktree
-    main_worktree=$(git rev-parse --show-toplevel)
+    main_worktree=$(get_main_repo_root)
+
+    local current_worktree
+    current_worktree=$(git rev-parse --show-toplevel)
+
+    # If we're in a worktree (not main repo) and not forcing interactive mode,
+    # offer to clean up the current worktree directly
+    if [[ "$current_worktree" != "$main_worktree" ]] && [[ "$force_interactive" == false ]]; then
+        local current_branch
+        current_branch=$(get_current_branch)
+
+        echo ""
+        local info
+        if [[ "$current_branch" != "HEAD" ]]; then
+            info=$(get_worktree_branch_info "$current_branch")
+        else
+            info="${COLOR_YELLOW}(detached HEAD)${COLOR_RESET}"
+            current_branch="detached"
+        fi
+
+        echo -e "Current worktree: $info"
+        echo -e "  ${COLOR_BOLD}${current_worktree}${COLOR_RESET}"
+        echo ""
+        echo -n "Remove this worktree? [Y/n]: "
+        read -r confirm
+
+        if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
+            echo ""
+            remove_worktree "$current_worktree" "$current_branch"
+        fi
+        exit 0
+    fi
 
     # Collect worktrees (excluding main)
     local -a worktree_paths=()
@@ -167,34 +250,7 @@ main() {
     local selected_branch="${worktree_branches[$index]:-detached}"
 
     echo ""
-    print_yellow "Removing worktree: $selected_path"
-
-    # Remove the worktree
-    git worktree remove "$selected_path"
-
-    print_green "Worktree removed successfully."
-
-    # Optionally delete the branch if it exists
-    if [[ "$selected_branch" != "detached" ]]; then
-        local main_branch
-        main_branch=$(get_main_branch)
-
-        # Check if branch is merged into main
-        if git branch --merged "$main_branch" | grep -q "^\s*${selected_branch}$"; then
-            # Auto-delete merged branches
-            git branch -d "$selected_branch"
-            print_green "Branch '$selected_branch' deleted (was merged into $main_branch)."
-        else
-            # Ask for unmerged branches
-            echo ""
-            echo -n "Also delete unmerged branch '$selected_branch'? [y/N]: "
-            read -r delete_branch
-            if [[ "$delete_branch" =~ ^[Yy]$ ]]; then
-                git branch -D "$selected_branch"
-                print_green "Branch '$selected_branch' deleted."
-            fi
-        fi
-    fi
+    remove_worktree "$selected_path" "$selected_branch"
 }
 
 main "$@"
