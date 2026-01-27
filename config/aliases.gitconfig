@@ -14,10 +14,10 @@
 
 	# rebase operations
 	rb = rebase
-	rbm = !git rbi "$(git get-main-branch)"       # rebase interactive against main branch
+	rbm = !git rb "$(git get-main-upstream-branch)"   # rebase against upstream main
 	rbmi = !git rbim                              # alias for rbim
 	rbi = rebase -i                               # interactive rebase
-	rbim = !git rbi "$(git get-main-branch)"      # rebase interactive against main branch
+	rbim = !git rbi "$(git get-main-upstream-branch)"  # rebase interactive against upstream main
 	rba = rebase --abort
 	rbc = rebase --continue
 	rbs = rebase --skip
