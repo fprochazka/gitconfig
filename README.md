@@ -60,7 +60,8 @@ This gitconfig provides many custom git commands and aliases for enhanced produc
 ### Branch History & Information
 - **`git h`** - Print history of current branch without pager (useful for terminal output)
 - **`git get-main-branch`** - Auto-detect main branch name (`master` or `main`)
-- **`git get-main-upstream-branch`** - Get upstream branch name (`upstream/main` or `origin/main`)
+- **`git get-main-upstream-branch`** - Get tracking branch of main (fails if not configured)
+- **`git get-main-ref-for-rebase`** - Get tracking branch of main (falls back to local main)
 - **`git get-current-branch`** - Get current branch name, even during rebase
 
 ### Work-in-Progress Management

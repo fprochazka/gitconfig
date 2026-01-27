@@ -47,7 +47,8 @@
 
 	# tries to detect main branch of this repo - if 'master' exists its master, otherwise main
 	get-main-branch = !git show-ref --quiet refs/heads/master && echo "master" || echo "main"
-	get-main-upstream-branch = !git show-ref --quiet "refs/heads/upstream/$(git get-main-branch)" && echo "upstream/$(git get-main-branch)" || echo "origin/$(git get-main-branch)"
+	get-main-upstream-branch = !git rev-parse --abbrev-ref "$(git get-main-branch)@{upstream}"
+	get-main-ref-for-rebase = !main="$(git get-main-branch)" && git rev-parse --abbrev-ref "$main@{upstream}" 2>/dev/null || echo "$main"
 
 	get-current-branch = !~/.config/gitconfig/bin/git-current-branch-name
 	commit-fixup-ask = !~/.config/gitconfig/bin/git-commit-fixup-ask
