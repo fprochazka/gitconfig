@@ -155,32 +155,28 @@ main() {
     fi
 
     # Process merged branches
-    if [[ ${#merged_branches[@]} -gt 0 ]]; then
-        if [[ "$do_drop" == true ]]; then
-            echo "Removing cleanly merged branches."
-            for branch in "${merged_branches[@]}"; do
-                git branch -d "$branch"
-            done
-        else
-            for branch in "${merged_branches[@]}"; do
-                echo "$branch"
-            done
-        fi
+    if [[ "$include_merged" == true ]] && [[ "$do_drop" == true ]]; then
+        echo "Removing cleanly merged branches."
     fi
+    for branch in "${merged_branches[@]+"${merged_branches[@]}"}"; do
+        if [[ "$do_drop" == true ]]; then
+            git branch -d "$branch"
+        else
+            echo "$branch"
+        fi
+    done
 
     # Process gone branches
-    if [[ ${#gone_branches[@]} -gt 0 ]]; then
-        if [[ "$do_drop" == true ]]; then
-            echo "Removing gone branches."
-            for branch in "${gone_branches[@]}"; do
-                git branch -D "$branch"
-            done
-        else
-            for branch in "${gone_branches[@]}"; do
-                echo "$branch"
-            done
-        fi
+    if [[ "$include_gone" == true ]] && [[ "$do_drop" == true ]]; then
+        echo "Removing gone branches."
     fi
+    for branch in "${gone_branches[@]+"${gone_branches[@]}"}"; do
+        if [[ "$do_drop" == true ]]; then
+            git branch -D "$branch"
+        else
+            echo "$branch"
+        fi
+    done
 }
 
 main "$@"
