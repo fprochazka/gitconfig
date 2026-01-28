@@ -23,7 +23,7 @@
 	com = !git co "$(git get-main-branch)" && git pull && git cleanup
 
 	# drop branches that were merged into remote or were removed from remote
-	cleanup = !git fetch --all --prune && git branches-merged-drop && git branches-gone-drop
+	cleanup = !git fetch --all --prune && git branches-gc --drop
 
 	find = !sh -c 'git ls-tree -r --name-only HEAD | grep --color $1' -
 	cf = show --pretty="format:" --name-only
@@ -33,17 +33,13 @@
 
 	permission-reset = "!git diff -p | grep -E '^(diff|old mode|new mode)' | sed -e 's/^old/NEW/;s/^new/old/;s/^NEW/new/' | git apply"
 
-	# list cleanly merged local branches
-	# filter out current branch and master, as we never want to delete them
-	branches-merged-list = !git branch --merged "$(git get-main-branch)" | grep -E -i -v '^\\s*(\\*|master|main|develop)'
-	branches-merged-drop = !echo "Removing cleanly merged branches." && git branches-merged-list | xargs -n 1 -r git branch -d
-
-	# list local branches
-	# filter out current branch and master, as we never want to delete them
-	# filter the lines to the 'gone' keyword at a specific place of the output
-	# cut only the first column (branch name)
-	branches-gone-list = !git branch -vv | grep -E -i -v '^\\s*(\\*|master|main|develop)' |grep ' gone] ' | awk '{ print $1 }'
-	branches-gone-drop = !echo "Removing gone branches." && git branches-gone-list | xargs -n 1 -r git branch -D
+	# branch garbage collection - list/drop merged and gone branches (excludes worktree branches)
+	branches-gc = !~/.config/gitconfig/bin/git-branches-gc
+	# backwards-compatible aliases
+	branches-merged-list = !git branches-gc --merged
+	branches-merged-drop = !git branches-gc --merged --drop
+	branches-gone-list = !git branches-gc --gone
+	branches-gone-drop = !git branches-gc --gone --drop
 
 	# tries to detect main branch of this repo - if 'master' exists its master, otherwise main
 	get-main-branch = !git show-ref --quiet refs/heads/master && echo "master" || echo "main"

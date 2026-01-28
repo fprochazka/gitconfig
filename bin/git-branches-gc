@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+#
+# git-branches-gc - List and optionally delete stale local branches
+#
+# Usage: git branches-gc [--merged] [--gone] [--drop]
+#
+# Lists branches that are either merged into main or have gone remotes.
+# Excludes current branch, main branches, and branches in worktrees.
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+show_help() {
+    cat << 'EOF'
+Usage: git branches-gc [--merged] [--gone] [--drop]
+
+List and optionally delete stale local branches.
+
+Filters:
+    --merged    Include branches merged into main
+    --gone      Include branches whose upstream is gone
+
+    If neither --merged nor --gone is specified, both are included.
+
+Actions:
+    --drop      Delete the listed branches (merged with -d, gone with -D)
+
+Excludes:
+  - Current branch (marked with *)
+  - Main branches (master, main, develop)
+  - Branches currently checked out in worktrees
+
+Examples:
+    git branches-gc                    # List all stale branches
+    git branches-gc --merged           # List only merged branches
+    git branches-gc --gone             # List only gone branches
+    git branches-gc --drop             # Delete all stale branches
+    git branches-gc --merged --drop    # Delete only merged branches
+EOF
+}
+
+# Get merged branches (excluding worktrees)
+get_merged_branches() {
+    local main_branch="$1"
+    shift
+    local -a worktree_branches=("$@")
+
+    git branch --merged "$main_branch" | { grep -E -i -v '^\s*(\*|master|main|develop)' || true; } | while read -r branch; do
+        # Trim whitespace
+        branch="${branch#"${branch%%[![:space:]]*}"}"
+        branch="${branch%"${branch##*[![:space:]]}"}"
+
+        [[ -z "$branch" ]] && continue
+
+        # Skip if branch is checked out in a worktree
+        local skip=false
+        for wt_branch in "${worktree_branches[@]+"${worktree_branches[@]}"}"; do
+            if [[ "$branch" == "$wt_branch" ]]; then
+                skip=true
+                break
+            fi
+        done
+
+        if [[ "$skip" == false ]]; then
+            echo "$branch"
+        fi
+    done
+}
+
+# Get gone branches (excluding worktrees)
+get_gone_branches() {
+    local -a worktree_branches=("$@")
+
+    git branch -vv | { grep -E -i -v '^\s*(\*|master|main|develop)' || true; } | { grep ' gone] ' || true; } | awk '{ print $1 }' | while read -r branch; do
+        [[ -z "$branch" ]] && continue
+
+        # Skip if branch is checked out in a worktree
+        local skip=false
+        for wt_branch in "${worktree_branches[@]+"${worktree_branches[@]}"}"; do
+            if [[ "$branch" == "$wt_branch" ]]; then
+                skip=true
+                break
+            fi
+        done
+
+        if [[ "$skip" == false ]]; then
+            echo "$branch"
+        fi
+    done
+}
+
+main() {
+    local include_merged=false
+    local include_gone=false
+    local do_drop=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --merged)
+                include_merged=true
+                shift
+                ;;
+            --gone)
+                include_gone=true
+                shift
+                ;;
+            --drop)
+                do_drop=true
+                shift
+                ;;
+            *)
+                die "Unknown option: $1"
+                ;;
+        esac
+    done
+
+    # If neither filter specified, include both
+    if [[ "$include_merged" == false ]] && [[ "$include_gone" == false ]]; then
+        include_merged=true
+        include_gone=true
+    fi
+
+    require_git_repo
+
+    local main_branch
+    main_branch=$(get_main_branch)
+
+    # Get branches checked out in worktrees
+    local -a worktree_branches=()
+    while IFS= read -r branch; do
+        worktree_branches+=("$branch")
+    done < <(get_worktree_branches)
+
+    # Collect branches to process
+    local -a merged_branches=()
+    local -a gone_branches=()
+
+    if [[ "$include_merged" == true ]]; then
+        while IFS= read -r branch; do
+            [[ -n "$branch" ]] && merged_branches+=("$branch")
+        done < <(get_merged_branches "$main_branch" "${worktree_branches[@]+"${worktree_branches[@]}"}")
+    fi
+
+    if [[ "$include_gone" == true ]]; then
+        while IFS= read -r branch; do
+            [[ -n "$branch" ]] && gone_branches+=("$branch")
+        done < <(get_gone_branches "${worktree_branches[@]+"${worktree_branches[@]}"}")
+    fi
+
+    # Process merged branches
+    if [[ ${#merged_branches[@]} -gt 0 ]]; then
+        if [[ "$do_drop" == true ]]; then
+            echo "Removing cleanly merged branches."
+            for branch in "${merged_branches[@]}"; do
+                git branch -d "$branch"
+            done
+        else
+            for branch in "${merged_branches[@]}"; do
+                echo "$branch"
+            done
+        fi
+    fi
+
+    # Process gone branches
+    if [[ ${#gone_branches[@]} -gt 0 ]]; then
+        if [[ "$do_drop" == true ]]; then
+            echo "Removing gone branches."
+            for branch in "${gone_branches[@]}"; do
+                git branch -D "$branch"
+            done
+        else
+            for branch in "${gone_branches[@]}"; do
+                echo "$branch"
+            done
+        fi
+    fi
+}
+
+main "$@"

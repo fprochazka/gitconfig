@@ -231,6 +231,13 @@ get_worktrees_dir() {
     echo "${parent_dir}/${project_basename}-worktrees"
 }
 
+# Get list of all branches currently checked out in worktrees
+# Usage: get_worktree_branches
+# Returns one branch name per line (excludes detached HEAD worktrees)
+get_worktree_branches() {
+    git worktree list --porcelain | grep '^branch refs/heads/' | sed 's|^branch refs/heads/||'
+}
+
 # Find existing worktree path for a branch
 # Usage: find_worktree_for_branch "branch-name"
 # Returns the path if found, exits with 1 otherwise
