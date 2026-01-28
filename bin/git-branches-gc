@@ -48,7 +48,7 @@ get_merged_branches() {
     shift
     local -a worktree_branches=("$@")
 
-    git branch --merged "$main_branch" | { grep -E -i -v '^\s*(\*|master|main|develop)' || true; } | while read -r branch; do
+    git branch --merged "$main_branch" | { grep -E -i -v '^\s*(\*|\+|master|main|develop)' || true; } | while read -r branch; do
         # Trim whitespace
         branch="${branch#"${branch%%[![:space:]]*}"}"
         branch="${branch%"${branch##*[![:space:]]}"}"
@@ -74,7 +74,7 @@ get_merged_branches() {
 get_gone_branches() {
     local -a worktree_branches=("$@")
 
-    git branch -vv | { grep -E -i -v '^\s*(\*|master|main|develop)' || true; } | { grep ' gone] ' || true; } | awk '{ print $1 }' | while read -r branch; do
+    git branch -vv | { grep -E -i -v '^\s*(\*|\+|master|main|develop)' || true; } | { grep ' gone] ' || true; } | awk '{ print $1 }' | while read -r branch; do
         [[ -z "$branch" ]] && continue
 
         # Skip if branch is checked out in a worktree
