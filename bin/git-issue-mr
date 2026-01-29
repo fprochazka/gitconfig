@@ -2,7 +2,7 @@
 #
 # git-issue-mr - Push branch and create merge/pull request
 #
-# Usage: git issue-mr [issue-id]
+# Usage: git issue-mr [--ready|--draft] [issue-id]
 #
 # Pushes the current branch and creates a merge request (GitLab) or
 # pull request (GitHub) using the issue details for the title.
@@ -24,9 +24,13 @@ source "${SCRIPT_DIR}/lib/vcs-hosting.sh"
 
 show_help() {
     cat << 'EOF'
-Usage: git issue-mr [issue-id]
+Usage: git issue-mr [--ready|--draft] [issue-id]
 
 Push current branch and create a merge/pull request.
+
+Options:
+    --draft     Create as draft MR/PR (default)
+    --ready     Create as ready MR/PR (not draft)
 
 Arguments:
     issue-id    Issue identifier (optional if already stored for branch)
@@ -35,7 +39,7 @@ Behavior:
     - Detects if remote is GitLab or GitHub
     - Checks if an MR/PR already exists for current branch
     - If exists, prints the URL and exits
-    - Otherwise, pushes branch and creates draft MR/PR with:
+    - Otherwise, pushes branch and creates MR/PR with:
       - Title: "<issue-id>: <issue-title>"
       - Remove source branch after merge
       - Auto-assigns to you
@@ -45,22 +49,45 @@ Configuration:
     git config --global issue-tracking.linearToken <your-token>
 
 Examples:
-    git issue-mr              # Use issue ID from branch config
-    git issue-mr ENG-123      # Specify issue ID explicitly
+    git issue-mr              # Use issue ID from branch config (draft)
+    git issue-mr ENG-123      # Specify issue ID explicitly (draft)
+    git issue-mr --ready      # Create ready MR/PR
+    git issue-mr --ready ENG-123
 EOF
 }
 
 main() {
-    # Handle --help
-    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        show_help
-        exit 0
-    fi
+    local draft=true
+    local issue_id=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --draft)
+                draft=true
+                shift
+                ;;
+            --ready)
+                draft=false
+                shift
+                ;;
+            -*)
+                die "Unknown option: $1"
+                ;;
+            *)
+                issue_id="$1"
+                shift
+                ;;
+        esac
+    done
 
     require_git_repo
     require_commits
 
-    local issue_id="${1:-}"
     local branch
 
     branch=$(get_current_branch)
@@ -110,7 +137,7 @@ main() {
     print_green "MR title: $mr_title"
 
     # Create MR/PR
-    vcs_mr_create "$mr_title"
+    vcs_mr_create "$mr_title" "$draft"
 }
 
 main "$@"

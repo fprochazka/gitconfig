@@ -73,15 +73,17 @@ vcs_mr_exists() {
 }
 
 # Create MR/PR for current branch
-# Usage: vcs_mr_create "MR Title"
+# Usage: vcs_mr_create "MR Title" [draft]
+# draft: "true" (default) or "false"
 vcs_mr_create() {
     local title="$1"
+    local draft="${2:-true}"
     local host
     host=$(vcs_get_host)
 
     case "$host" in
-        gitlab) _gitlab_mr_create "$title" ;;
-        github) _github_pr_create "$title" ;;
+        gitlab) _gitlab_mr_create "$title" "$draft" ;;
+        github) _github_pr_create "$title" "$draft" ;;
         *) die "Unsupported VCS host: $host" ;;
     esac
 }
@@ -185,9 +187,14 @@ _gitlab_mr_exists() {
 
 _gitlab_mr_create() {
     local title="$1"
+    local draft="${2:-true}"
 
     print_bold "Creating GitLab merge request..."
-    glab mr create --push --draft --remove-source-branch --assignee '@me' --title "$title" --description '' --yes
+    local draft_flag=()
+    if [[ "$draft" == "true" ]]; then
+        draft_flag=(--draft)
+    fi
+    glab mr create --push "${draft_flag[@]}" --remove-source-branch --assignee '@me' --title "$title" --description '' --yes
 }
 
 _gitlab_mr_view() {
@@ -243,6 +250,7 @@ _github_pr_exists() {
 
 _github_pr_create() {
     local title="$1"
+    local draft="${2:-true}"
 
     # Ensure branch is pushed first
     if ! git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
@@ -251,7 +259,11 @@ _github_pr_create() {
     fi
 
     print_bold "Creating GitHub pull request..."
-    gh pr create --draft --assignee '@me' --title "$title" --body ''
+    local draft_flag=()
+    if [[ "$draft" == "true" ]]; then
+        draft_flag=(--draft)
+    fi
+    gh pr create "${draft_flag[@]}" --assignee '@me' --title "$title" --body ''
 }
 
 _github_pr_view() {
