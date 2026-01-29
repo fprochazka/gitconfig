@@ -93,6 +93,7 @@ This gitconfig provides many custom git commands and aliases for enhanced produc
 - **`git cf <commit>`** - Show files changed in a commit
 
 ### Repository Management
+- **`git list-repos [dir]`** - List all git repositories as relative paths (does not descend into repos)
 - **`git sync-all-repos [dir]`** - Recursively sync all git repositories in directory
 - **`git gitlab-clone-all`** - Clone all repositories from a GitLab group (uses `glab` CLI for auth)
 - **`git github-clone-all --org=ORG`** - Clone all repositories from a GitHub organization including wikis (uses `gh` CLI for auth)

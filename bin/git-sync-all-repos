@@ -59,17 +59,6 @@ cleanup() {
 }
 
 #
-# Repository discovery
-#
-
-find_repos() {
-    local dir="$1"
-    find "$dir" -name ".git" -type d 2>/dev/null | while read -r git_dir; do
-        echo "${git_dir%/.git}"
-    done
-}
-
-#
 # Git operations
 #
 
@@ -204,7 +193,7 @@ main() {
     echo "Scanning for git repositories..."
 
     local repo_list
-    if ! repo_list=$(find_repos "$start_dir"); then
+    if ! repo_list=$(find_git_repos "$start_dir"); then
         die "Failed to scan for repositories"
     fi
 

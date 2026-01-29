@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+#
+# Usage
+#
+
+usage() {
+    cat <<EOF
+Usage: git list-repos [DIRECTORY]
+
+Recursively find all git repositories and print their relative paths.
+
+Arguments:
+  DIRECTORY    Directory to scan for git repositories (default: current directory)
+
+Output:
+  Prints one relative path per line, suitable for piping to other commands.
+
+Examples:
+  git list-repos
+  git list-repos ~/projects
+  git list-repos /path/to/workspace | xargs -I {} git -C {} status
+
+Options:
+  -h, --help    Show this help message
+EOF
+    exit 0
+}
+
+#
+# Main
+#
+
+main() {
+    if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+        usage
+    fi
+
+    local start_dir="${1:-.}"
+
+    if [[ ! -d "$start_dir" ]]; then
+        die "Directory does not exist: $start_dir"
+    fi
+
+    # Resolve to absolute path for prefix stripping
+    local abs_start_dir
+    abs_start_dir=$(cd "$start_dir" && pwd)
+
+    # Convert absolute paths to relative
+    find_git_repos "$start_dir" | while read -r repo_path; do
+        echo "${repo_path#"$abs_start_dir"/}"
+    done
+}
+
+main "$@"

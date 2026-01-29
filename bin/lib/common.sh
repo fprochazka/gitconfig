@@ -238,6 +238,23 @@ get_worktree_branches() {
     git worktree list --porcelain | grep '^branch refs/heads/' | sed 's|^branch refs/heads/||'
 }
 
+#
+# Repository discovery
+#
+
+# Find all git repositories under a directory
+# Outputs absolute paths, one per line, sorted
+# Does not descend into directories that are already git repositories
+# Usage: find_git_repos [directory]
+find_git_repos() {
+    local dir="${1:-.}"
+    local start_dir
+    start_dir=$(cd "$dir" && pwd)
+
+    # For each directory, check if it contains .git - if so, print and don't descend
+    find "$start_dir" -type d \( -exec test -d '{}/.git' \; -print -prune \) 2>/dev/null | sort
+}
+
 # Find existing worktree path for a branch
 # Usage: find_worktree_for_branch "branch-name"
 # Returns the path if found, exits with 1 otherwise

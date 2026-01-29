@@ -49,6 +49,7 @@
 	get-current-branch = !~/.config/gitconfig/bin/git-current-branch-name
 	commit-fixup-ask = !~/.config/gitconfig/bin/git-commit-fixup-ask
 	log-vgrep-most-recent-commit = !~/.config/gitconfig/bin/git-log-vgrep-most-recent-commit
+	list-repos = !~/.config/gitconfig/bin/git-list-repos
 	sync-all-repos = !~/.config/gitconfig/bin/git-sync-all-repos
 	gitlab-clone-all = !~/.config/gitconfig/bin/git-gitlab-clone-all
 	github-clone-all = !~/.config/gitconfig/bin/git-github-clone-all
