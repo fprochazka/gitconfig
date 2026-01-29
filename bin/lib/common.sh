@@ -242,6 +242,36 @@ get_worktree_branches() {
 # Repository discovery
 #
 
+# Recursive helper for find_git_repos - not meant to be called directly
+# DFS traversal that stops at git repositories (doesn't descend into them)
+_find_git_repos_recurse() {
+    local dir="$1"
+
+    # If this is a git repo, print and stop recursing
+    if [[ -d "$dir/.git" ]]; then
+        printf '%s\n' "$dir"
+        return
+    fi
+
+    local entry
+
+    # Recurse into non-hidden subdirectories
+    # The || true prevents set -e from triggering when glob doesn't match
+    for entry in "$dir"/*/; do
+        [[ -d "$entry" ]] && _find_git_repos_recurse "${entry%/}" || true
+    done
+
+    # Hidden directories (.[!.] matches .x but not . or ..)
+    for entry in "$dir"/.[!.]*/; do
+        [[ -d "$entry" ]] && _find_git_repos_recurse "${entry%/}" || true
+    done
+
+    # Directories starting with .. (..? matches ..x but not ..)
+    for entry in "$dir"/..?*/; do
+        [[ -d "$entry" ]] && _find_git_repos_recurse "${entry%/}" || true
+    done
+}
+
 # Find all git repositories under a directory
 # Outputs absolute paths, one per line, sorted
 # Does not descend into directories that are already git repositories
@@ -251,8 +281,7 @@ find_git_repos() {
     local start_dir
     start_dir=$(cd "$dir" && pwd)
 
-    # For each directory, check if it contains .git - if so, print and don't descend
-    find "$start_dir" -type d \( -exec test -d '{}/.git' \; -print -prune \) 2>/dev/null | sort
+    _find_git_repos_recurse "$start_dir" | sort
 }
 
 # Find existing worktree path for a branch
