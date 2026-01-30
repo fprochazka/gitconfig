@@ -150,7 +150,16 @@ main() {
 
     if [[ "$include_gone" == true ]]; then
         while IFS= read -r branch; do
-            [[ -n "$branch" ]] && gone_branches+=("$branch")
+            [[ -z "$branch" ]] && continue
+            # Skip branches already in merged list to avoid double-deletion
+            local already_merged=false
+            for merged in "${merged_branches[@]+"${merged_branches[@]}"}"; do
+                if [[ "$branch" == "$merged" ]]; then
+                    already_merged=true
+                    break
+                fi
+            done
+            [[ "$already_merged" == false ]] && gone_branches+=("$branch")
         done < <(get_gone_branches "${worktree_branches[@]+"${worktree_branches[@]}"}")
     fi
 
