@@ -158,25 +158,11 @@ issue_create_mr_title() {
     local issue_json="$1"
     local identifier
     local title
-    local prefix
-    local remaining_len
 
     identifier=$(issue_identifier "$issue_json")
     title=$(issue_title "$issue_json")
 
-    prefix="${identifier}: "
-    remaining_len=$((72 - ${#prefix}))
-
-    if [[ $remaining_len -le 0 ]]; then
-        echo "$identifier"
-        return
-    fi
-
-    if [[ ${#title} -gt $remaining_len ]]; then
-        title="${title:0:$remaining_len}"
-    fi
-
-    echo "${prefix}${title}"
+    echo "${identifier}: ${title}"
 }
 
 #
