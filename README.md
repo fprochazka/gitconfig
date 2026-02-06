@@ -97,6 +97,7 @@ This gitconfig provides many custom git commands and aliases for enhanced produc
 - **`git sync-all-repos [dir]`** - Recursively sync all git repositories in directory
 - **`git gitlab-clone-all`** - Clone all repositories from a GitLab group (uses `glab` CLI for auth)
 - **`git github-clone-all --org=ORG`** - Clone all repositories from a GitHub organization including wikis (uses `gh` CLI for auth)
+- **`git libs-clone <url>`** - Clone a repository into libs directory organized by `<hostname>/<path>` (configurable via `clone.libs-dir`, default `~/devel/libs`)
 - **`git remote-host-provider [remote]`** - Detect if remote is GitHub or GitLab (cached)
 - **`git upstream-info [--name-only]`** - Show if origin is a fork and what the parent repo is
 

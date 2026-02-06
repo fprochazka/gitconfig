@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+#
+# Usage
+#
+
+usage() {
+    cat <<EOF
+Usage: git libs-clone <repository> [<git-clone-options>...]
+
+Clone a repository into the libs directory, organized by hostname and path.
+
+The target directory is computed from the clone URL:
+  <libs-base>/<hostname>/<path>
+
+For example:
+  git@github.com:spring-projects/spring-boot.git
+    -> ~/devel/libs/github.com/spring-projects/spring-boot
+
+  https://gitlab.com/org/sub-group/repo.git
+    -> ~/devel/libs/gitlab.com/org/sub-group/repo
+
+Configuration:
+  clone.libs-dir  Base directory for cloned repositories (default: ~/devel/libs)
+
+  Set via: git config --global clone.libs-dir /path/to/libs
+
+Options:
+  -n, --dry-run   Show what would be done without cloning
+  -h, --help      Show this help message
+
+Any additional arguments are passed through to 'git clone'.
+
+Examples:
+  git libs-clone git@github.com:spring-projects/spring-boot.git
+  git libs-clone https://gitlab.com/org/project.git
+  git libs-clone git@github.com:owner/repo.git --depth=1
+  git libs-clone --dry-run git@github.com:owner/repo.git
+EOF
+    exit 0
+}
+
+#
+# Configuration
+#
+
+get_libs_basedir() {
+    local basedir
+    basedir=$(git config --get clone.libs-dir 2>/dev/null || true)
+
+    if [[ -z "$basedir" ]]; then
+        basedir="${HOME}/devel/libs"
+    fi
+
+    # Expand ~ if present
+    basedir="${basedir/#\~/$HOME}"
+
+    echo "$basedir"
+}
+
+#
+# URL parsing
+#
+
+# Parse a git URL and extract hostname and path
+# Supports:
+#   git@github.com:owner/repo.git          (SCP-like)
+#   https://github.com/owner/repo.git      (HTTPS)
+#   ssh://git@github.com/owner/repo.git    (SSH protocol)
+#   ssh://git@github.com:22/owner/repo.git (SSH with port)
+#   git://github.com/owner/repo.git        (Git protocol)
+#   http://github.com/owner/repo.git       (HTTP)
+parse_git_url() {
+    local url="$1"
+    local hostname=""
+    local path=""
+
+    if [[ "$url" =~ ^[a-zA-Z0-9._-]+@([^:]+):(.+)$ ]]; then
+        # SCP-like: git@github.com:owner/repo.git
+        hostname="${BASH_REMATCH[1]}"
+        path="${BASH_REMATCH[2]}"
+
+    elif [[ "$url" =~ ^(https?|git|ssh)://([^@]+@)?([^/:]+)(:[0-9]+)?/(.+)$ ]]; then
+        # Protocol URLs: https://github.com/owner/repo.git
+        #                ssh://git@github.com/owner/repo.git
+        #                ssh://git@github.com:22/owner/repo.git
+        hostname="${BASH_REMATCH[3]}"
+        path="${BASH_REMATCH[5]}"
+
+    else
+        die "Cannot parse git URL: $url"
+    fi
+
+    # Strip .git suffix
+    path="${path%.git}"
+
+    # Strip trailing slash
+    path="${path%/}"
+
+    echo "${hostname}/${path}"
+}
+
+#
+# Argument parsing
+#
+
+parse_args() {
+    REPO_URL=""
+    DRY_RUN=false
+    CLONE_ARGS=()
+
+    if [[ $# -eq 0 ]]; then
+        usage
+    fi
+
+    for arg in "$@"; do
+        case "$arg" in
+            -h|--help)
+                usage
+                ;;
+            -n|--dry-run)
+                DRY_RUN=true
+                ;;
+            *)
+                if [[ -z "$REPO_URL" ]] && [[ "$arg" != -* ]]; then
+                    REPO_URL="$arg"
+                else
+                    CLONE_ARGS+=("$arg")
+                fi
+                ;;
+        esac
+    done
+
+    if [[ -z "$REPO_URL" ]]; then
+        die "Repository URL is required"
+    fi
+}
+
+#
+# Main
+#
+
+main() {
+    parse_args "$@"
+
+    local basedir
+    basedir=$(get_libs_basedir)
+
+    local relative_path
+    relative_path=$(parse_git_url "$REPO_URL")
+
+    local target_path="${basedir}/${relative_path}"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo "Would clone:"
+        echo "  Repository: $REPO_URL"
+        echo "  Target:     $target_path"
+        if [[ ${#CLONE_ARGS[@]} -gt 0 ]]; then
+            echo "  Extra args: ${CLONE_ARGS[*]}"
+        fi
+        exit 0
+    fi
+
+    if [[ -d "$target_path" ]]; then
+        die "Target directory already exists: $target_path"
+    fi
+
+    # Create parent directory
+    local parent_dir
+    parent_dir=$(dirname "$target_path")
+    mkdir -p "$parent_dir"
+
+    echo "Cloning into ${target_path} ..."
+    git clone "$REPO_URL" "$target_path" "${CLONE_ARGS[@]}"
+}
+
+main "$@"
