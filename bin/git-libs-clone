@@ -12,6 +12,7 @@ usage() {
 Usage: git libs-clone <repository> [<git-clone-options>...]
 
 Clone a repository into the libs directory, organized by hostname and path.
+If the target directory already exists, fetch and pull instead of cloning.
 
 The target directory is computed from the clone URL:
   <libs-base>/<hostname>/<path>
@@ -140,6 +141,53 @@ parse_args() {
 }
 
 #
+# Sync existing repo (fetch + pull if appropriate)
+#
+
+sync_existing_repo() {
+    local repo_path="$1"
+
+    echo "Already cloned, syncing ${repo_path} ..."
+
+    # Fetch
+    if ! git -C "$repo_path" fetch --all 2>&1; then
+        die "Fetch failed"
+    fi
+
+    # Check current branch
+    local current_branch
+    if ! current_branch=$(git -C "$repo_path" rev-parse --abbrev-ref HEAD 2>/dev/null); then
+        warn "Empty repository, fetched only"
+        return
+    fi
+
+    if ! is_main_branch "$current_branch"; then
+        print_yellow "Fetched (on $current_branch, not pulling)"
+        return
+    fi
+
+    # Check if worktree is clean
+    if ! git -C "$repo_path" diff --quiet 2>/dev/null || \
+       ! git -C "$repo_path" diff --cached --quiet 2>/dev/null; then
+        print_yellow "Fetched (worktree dirty, not pulling)"
+        return
+    fi
+
+    # Check for upstream tracking
+    if ! git -C "$repo_path" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+        print_yellow "Fetched (no tracking branch, not pulling)"
+        return
+    fi
+
+    # Pull
+    if ! git -C "$repo_path" pull 2>&1; then
+        die "Pull failed"
+    fi
+
+    print_green "Fetched and pulled."
+}
+
+#
 # Main
 #
 
@@ -155,7 +203,11 @@ main() {
     local target_path="${basedir}/${relative_path}"
 
     if [[ "$DRY_RUN" == true ]]; then
-        echo "Would clone:"
+        if [[ -d "$target_path" ]]; then
+            echo "Would sync existing repo:"
+        else
+            echo "Would clone:"
+        fi
         echo "  Repository: $REPO_URL"
         echo "  Target:     $target_path"
         if [[ ${#CLONE_ARGS[@]} -gt 0 ]]; then
@@ -165,7 +217,8 @@ main() {
     fi
 
     if [[ -d "$target_path" ]]; then
-        die "Target directory already exists: $target_path"
+        sync_existing_repo "$target_path"
+        exit 0
     fi
 
     # Create parent directory
