@@ -17,12 +17,14 @@ set -euo pipefail
 readonly COLOR_RED='\033[31m'
 readonly COLOR_GREEN='\033[32m'
 readonly COLOR_YELLOW='\033[33m'
+readonly COLOR_PURPLE='\033[35m'
 readonly COLOR_BOLD='\033[1m'
 readonly COLOR_RESET='\033[0m'
 
 print_red()    { echo -e "${COLOR_RED}$*${COLOR_RESET}"; }
 print_green()  { echo -e "${COLOR_GREEN}$*${COLOR_RESET}"; }
 print_yellow() { echo -e "${COLOR_YELLOW}$*${COLOR_RESET}"; }
+print_purple() { echo -e "${COLOR_PURPLE}$*${COLOR_RESET}"; }
 print_bold()   { echo -e "${COLOR_BOLD}$*${COLOR_RESET}"; }
 
 #
@@ -106,6 +108,58 @@ get_main_branch() {
 is_main_branch() {
     local branch="$1"
     [[ "$branch" =~ ^(master|main)$ ]]
+}
+
+# Check if branch is merged into another branch (all commits reachable from target)
+# This is the standard git definition: branch is an ancestor of target
+# Usage: is_branch_merged "branch" ["target_branch"]  (default target: main branch)
+is_branch_merged() {
+    local branch="$1"
+    local target="${2:-$(get_main_branch)}"
+    git merge-base --is-ancestor "$branch" "$target" 2>/dev/null
+}
+
+# Check if branch has zero commits ahead of target
+# The branch pointer sits on a commit that is directly on target's history
+# Usage: is_branch_no_changes "branch" ["target_branch"]
+is_branch_no_changes() {
+    local branch="$1"
+    local target="${2:-$(get_main_branch)}"
+    local ahead
+    ahead=$(git rev-list --count "${target}..${branch}" 2>/dev/null || echo 0)
+    [[ "$ahead" -eq 0 ]]
+}
+
+# Check if branch had its own work that was merged into target
+# True when branch is merged AND its tip is on a side branch (not on target's first-parent line)
+# Usage: is_branch_merged_with_changes "branch" ["target_branch"] ["mainline_commits_file"]
+# The optional mainline_commits_file is a file with first-parent commit hashes for bulk use
+is_branch_merged_with_changes() {
+    local branch="$1"
+    local target="${2:-$(get_main_branch)}"
+    local mainline_file="${3:-}"
+
+    # Must be merged first
+    is_branch_merged "$branch" "$target" || return 1
+
+    # Must not be on target's first-parent line
+    local tip
+    tip=$(git rev-parse "$branch" 2>/dev/null) || return 1
+
+    if [[ -n "$mainline_file" ]]; then
+        # Use precomputed file for performance
+        ! grep -qFx "$tip" "$mainline_file"
+    else
+        ! git log --first-parent --format='%H' "$target" | grep -qFm1 "$tip"
+    fi
+}
+
+# Output first-parent commit hashes of a branch, one per line
+# Use to precompute mainline commits for bulk is_branch_merged_with_changes calls
+# Usage: mainline_file=$(mktemp); get_mainline_commits "main" > "$mainline_file"
+get_mainline_commits() {
+    local target="${1:-$(get_main_branch)}"
+    git log --first-parent --format='%H' "$target"
 }
 
 # Check if branch has an upstream tracking branch
@@ -214,7 +268,10 @@ sanitize_worktree_dirname() {
 # Returns: /path/to/main/repo (not the worktree path)
 get_main_repo_root() {
     # First worktree listed is always the main repository
-    git worktree list --porcelain | head -1 | sed 's/^worktree //'
+    # Note: avoid 'head -1' in pipeline - causes SIGPIPE with pipefail on large output
+    local line
+    read -r line < <(git worktree list --porcelain)
+    echo "${line#worktree }"
 }
 
 # Get the worktrees directory path for a git repository

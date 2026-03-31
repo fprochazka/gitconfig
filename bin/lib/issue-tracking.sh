@@ -207,9 +207,9 @@ issue_find_existing_branch() {
     done < <(git for-each-ref --format='%(refname:short)' refs/heads/)
 
     # Fall back to pattern matching in branch name
+    # Note: avoid 'head -n1' in pipeline - causes SIGPIPE with pipefail on large output
     branch=$(git for-each-ref --format='%(refname:short)' refs/heads/ \
-        | grep -i "/${issue_id}-\|/${issue_id}$" \
-        | head -n1 || true)
+        | grep -im1 "/${issue_id}-\|/${issue_id}$" || true)
 
     if [[ -n "$branch" ]]; then
         echo "$branch"
