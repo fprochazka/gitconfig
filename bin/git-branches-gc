@@ -42,18 +42,20 @@ Examples:
 EOF
 }
 
-# Get merged branches (excluding worktrees)
+# Get merged branches (excluding current, main, develop, and worktrees)
 get_merged_branches() {
     local main_branch="$1"
     shift
     local -a worktree_branches=("$@")
 
-    git branch --merged "$main_branch" | { grep -E -i -v '^\s*(\*|\+|master|main|develop)' || true; } | while read -r branch; do
-        # Trim whitespace
-        branch="${branch#"${branch%%[![:space:]]*}"}"
-        branch="${branch%"${branch##*[![:space:]]}"}"
-
+    git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r branch; do
         [[ -z "$branch" ]] && continue
+
+        # Skip main/develop branches
+        [[ "$branch" =~ ^(master|main|develop)$ ]] && continue
+
+        # Skip if not merged
+        is_branch_merged "$branch" "$main_branch" || continue
 
         # Skip if branch is checked out in a worktree
         local skip=false

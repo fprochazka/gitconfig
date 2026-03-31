@@ -47,8 +47,9 @@ get_worktree_branch_info() {
     # Get short commit hash
     commit_hash=$(git rev-parse --short "$branch" 2>/dev/null || echo "??????")
 
-    # Get first line of commit message
-    commit_msg=$(git log -1 --format='%s' "$branch" 2>/dev/null | head -c 60 || echo "")
+    # Get first line of commit message (truncated to 60 chars)
+    commit_msg=$(git log -1 --format='%s' "$branch" 2>/dev/null || echo "")
+    commit_msg="${commit_msg:0:60}"
 
     # Get upstream tracking info
     local upstream
@@ -90,7 +91,7 @@ remove_worktree() {
         main_branch=$(get_main_branch)
 
         # Check if branch is merged into main
-        if git branch --merged "$main_branch" | grep -q "^\s*${selected_branch}$"; then
+        if is_branch_merged "$selected_branch" "$main_branch"; then
             # Auto-delete merged branches
             git branch -d "$selected_branch"
             print_green "Branch '$selected_branch' deleted (was merged into $main_branch)."
@@ -104,6 +105,67 @@ remove_worktree() {
                 print_green "Branch '$selected_branch' deleted."
             fi
         fi
+    fi
+}
+
+# Find and remove orphaned directories in the worktrees directory
+# These are leftover dirs that git worktree no longer tracks
+# Usage: cleanup_orphaned_dirs <main_worktree_path>
+cleanup_orphaned_dirs() {
+    local main_worktree="$1"
+    local worktrees_dir
+    worktrees_dir=$(get_worktrees_dir "$main_worktree")
+
+    # No worktrees directory - nothing to clean
+    [[ -d "$worktrees_dir" ]] || return 0
+
+    # Collect known worktree paths from git
+    local -a known_paths=()
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
+            known_paths+=("${BASH_REMATCH[1]}")
+        fi
+    done < <(git worktree list --porcelain)
+
+    # Check each directory in the worktrees dir
+    local -a orphaned=()
+    local dir
+    for dir in "$worktrees_dir"/*/; do
+        [[ -d "$dir" ]] || continue
+        dir="${dir%/}"  # strip trailing slash
+
+        local is_known=false
+        local known
+        for known in "${known_paths[@]}"; do
+            if [[ "$dir" == "$known" ]]; then
+                is_known=true
+                break
+            fi
+        done
+
+        if [[ "$is_known" == false ]]; then
+            orphaned+=("$dir")
+        fi
+    done
+
+    [[ ${#orphaned[@]} -gt 0 ]] || return 0
+
+    print_yellow "Found ${#orphaned[@]} orphaned worktree directories (not tracked by git):"
+    echo ""
+    for dir in "${orphaned[@]}"; do
+        echo "  $(basename "$dir")/"
+    done
+    echo ""
+    echo -n "Remove all orphaned directories? [y/N]: "
+    local confirm=""
+    read -r confirm || true
+
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        for dir in "${orphaned[@]}"; do
+            rm -rf "$dir"
+            print_green "Removed: $(basename "$dir")/"
+        done
+        echo ""
     fi
 }
 
@@ -131,6 +193,12 @@ main() {
 
     local main_worktree
     main_worktree=$(get_main_repo_root)
+
+    # Prune stale worktree references (e.g. manually deleted directories)
+    git worktree prune
+
+    # Clean up orphaned worktree directories (not tracked by git worktree list)
+    cleanup_orphaned_dirs "$main_worktree"
 
     local current_worktree
     current_worktree=$(git rev-parse --show-toplevel)
@@ -209,6 +277,14 @@ main() {
         exit 0
     fi
 
+    # Precompute mainline commits for bulk merged-with-changes detection
+    local main_branch
+    main_branch=$(get_main_branch)
+    local mainline_file
+    mainline_file=$(mktemp)
+    get_mainline_commits "$main_branch" > "$mainline_file"
+    trap 'rm -f "$mainline_file"' EXIT
+
     # Build display list
     echo ""
     print_bold "Worktrees:"
@@ -219,6 +295,15 @@ main() {
         local branch="${worktree_branches[$i]:-detached}"
         local num=$((i + 1))
 
+        local status_tag=""
+        if [[ "$branch" != "detached" ]]; then
+            if is_branch_merged_with_changes "$branch" "$main_branch" "$mainline_file"; then
+                status_tag="${COLOR_PURPLE}[merged]${COLOR_RESET} "
+            elif is_branch_no_changes "$branch" "$main_branch"; then
+                status_tag="${COLOR_PURPLE}[no changes]${COLOR_RESET} "
+            fi
+        fi
+
         local info
         if [[ "$branch" != "detached" ]]; then
             info=$(get_worktree_branch_info "$branch")
@@ -226,7 +311,7 @@ main() {
             info="${COLOR_YELLOW}(detached HEAD)${COLOR_RESET}"
         fi
 
-        printf "  %2d) %s\n" "$num" "$info"
+        printf "  %2d) %b%s\n" "$num" "$status_tag" "$info"
         printf "      ${COLOR_BOLD}%s${COLOR_RESET}\n" "$path"
         echo ""
     done
