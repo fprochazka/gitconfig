@@ -80,8 +80,18 @@ remove_worktree() {
 
     print_yellow "Removing worktree: $selected_path"
 
-    # Remove the worktree
-    git worktree remove "$selected_path"
+    # Remove the worktree, offering --force if it has modifications
+    if ! git worktree remove "$selected_path" 2>/dev/null; then
+        warn "Worktree contains modified or untracked files."
+        echo -n "Force remove? [y/N]: "
+        local confirm=""
+        read -r confirm || true
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            git worktree remove --force "$selected_path"
+        else
+            die "Aborted."
+        fi
+    fi
 
     print_green "Worktree removed successfully."
 
@@ -280,10 +290,9 @@ main() {
     # Precompute mainline commits for bulk merged-with-changes detection
     local main_branch
     main_branch=$(get_main_branch)
-    local mainline_file
-    mainline_file=$(mktemp)
-    get_mainline_commits "$main_branch" > "$mainline_file"
-    trap 'rm -f "$mainline_file"' EXIT
+    _mainline_file=$(mktemp)
+    get_mainline_commits "$main_branch" > "$_mainline_file"
+    trap 'rm -f "$_mainline_file"' EXIT
 
     # Build display list
     echo ""
@@ -297,7 +306,7 @@ main() {
 
         local status_tag=""
         if [[ "$branch" != "detached" ]]; then
-            if is_branch_merged_with_changes "$branch" "$main_branch" "$mainline_file"; then
+            if is_branch_merged_with_changes "$branch" "$main_branch" "$_mainline_file"; then
                 status_tag="${COLOR_PURPLE}[merged]${COLOR_RESET} "
             elif is_branch_no_changes "$branch" "$main_branch"; then
                 status_tag="${COLOR_PURPLE}[no changes]${COLOR_RESET} "
