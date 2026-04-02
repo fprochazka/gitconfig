@@ -386,14 +386,11 @@ warmup_worktree() {
     local worktree_path="$1"
     local git_root="$2"
 
-    # Build grep pattern for excluding build artifact directories
-    local exclude_pattern=""
+    # Build grep pattern for excluding build artifact directories and the worktrees dir itself
+    local exclude_pattern="(^|/)\.worktrees/"
     local dir
     for dir in "${WARMUP_EXCLUDE_DIRS[@]}"; do
-        if [[ -n "$exclude_pattern" ]]; then
-            exclude_pattern="${exclude_pattern}|"
-        fi
-        exclude_pattern="${exclude_pattern}(^|/)${dir}/"
+        exclude_pattern="${exclude_pattern}|(^|/)${dir}/"
     done
 
     # Get all gitignored files, excluding build artifacts
