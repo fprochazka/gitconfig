@@ -489,7 +489,7 @@ create_worktree() {
     # Create worktrees directory if it doesn't exist
     if [[ ! -d "$worktrees_dir" ]]; then
         mkdir -p "$worktrees_dir"
-        print_green "Created worktrees directory: $worktrees_dir"
+        print_green "Created worktrees directory: $worktrees_dir" >&2
     fi
 
     # Check if worktree already exists
