@@ -379,9 +379,109 @@ find_worktree_for_branch() {
     return 1
 }
 
+# JetBrains IDE config directories - subdirs are symlinked, files are copied
+readonly JETBRAINS_CONFIG_DIRS=(.idea)
+
+# Build artifact directories excluded from worktree warmup
+readonly WARMUP_EXCLUDE_DIRS=(target node_modules build dist .gradle vendor __pycache__ .mypy_cache .pytest_cache .tox .venv venv)
+
+# Warm up a new worktree by copying gitignored files from the main repo
+# JetBrains config dirs get special handling: subdirs are symlinked, files are copied
+# Build artifact directories are skipped
+# Usage: warmup_worktree <worktree_path> <git_root>
+warmup_worktree() {
+    local worktree_path="$1"
+    local git_root="$2"
+
+    # Build grep pattern for excluding build artifact directories
+    local exclude_pattern=""
+    local dir
+    for dir in "${WARMUP_EXCLUDE_DIRS[@]}"; do
+        if [[ -n "$exclude_pattern" ]]; then
+            exclude_pattern="${exclude_pattern}|"
+        fi
+        exclude_pattern="${exclude_pattern}(^|/)${dir}/"
+    done
+
+    # Get all gitignored files, excluding build artifacts
+    local -a ignored_files=()
+    while IFS= read -r file; do
+        ignored_files+=("$file")
+    done < <(git -C "$git_root" ls-files --others --ignored --exclude-standard 2>/dev/null | grep -Ev "$exclude_pattern" || true)
+
+    [[ ${#ignored_files[@]} -gt 0 ]] || return 0
+
+    # Process JetBrains config dirs with special handling
+    local jetbrains_dir
+    for jetbrains_dir in "${JETBRAINS_CONFIG_DIRS[@]}"; do
+        [[ -d "${git_root}/${jetbrains_dir}" ]] || continue
+
+        # Ensure the target .idea/ dir exists
+        mkdir -p "${worktree_path}/${jetbrains_dir}"
+
+        # Find subdirectories to symlink (unique top-level dirs inside .idea/)
+        local -a symlinked_dirs=()
+        local subdir
+        while IFS= read -r subdir; do
+            [[ -n "$subdir" ]] || continue
+            if [[ -d "${git_root}/${jetbrains_dir}/${subdir}" ]] && [[ ! -e "${worktree_path}/${jetbrains_dir}/${subdir}" ]]; then
+                ln -s "${git_root}/${jetbrains_dir}/${subdir}" "${worktree_path}/${jetbrains_dir}/${subdir}"
+                symlinked_dirs+=("$subdir")
+            fi
+        done < <(printf '%s\n' "${ignored_files[@]}" | grep "^${jetbrains_dir}/" | sed "s|^${jetbrains_dir}/||; s|/.*||" | sort -u)
+
+        # Copy regular files (not inside symlinked subdirs)
+        local file
+        for file in "${ignored_files[@]}"; do
+            [[ "$file" == "${jetbrains_dir}/"* ]] || continue
+            local rel="${file#${jetbrains_dir}/}"
+            local top_level="${rel%%/*}"
+
+            # Skip if this file is inside a symlinked subdir
+            if [[ -d "${git_root}/${jetbrains_dir}/${top_level}" ]]; then
+                continue
+            fi
+
+            # Copy the file
+            local target_dir
+            target_dir=$(dirname "${worktree_path}/${file}")
+            mkdir -p "$target_dir"
+            cp -a "${git_root}/${file}" "${worktree_path}/${file}"
+        done
+
+        print_green "${jetbrains_dir}/ settings copied" >&2
+    done
+
+    # Copy remaining gitignored files (not in JetBrains dirs)
+    local file
+    local copied_other=false
+    for file in "${ignored_files[@]}"; do
+        # Skip JetBrains config dirs (already handled)
+        local skip=false
+        for jetbrains_dir in "${JETBRAINS_CONFIG_DIRS[@]}"; do
+            if [[ "$file" == "${jetbrains_dir}/"* ]]; then
+                skip=true
+                break
+            fi
+        done
+        [[ "$skip" == false ]] || continue
+
+        local target_dir
+        target_dir=$(dirname "${worktree_path}/${file}")
+        mkdir -p "$target_dir"
+        cp -a "${git_root}/${file}" "${worktree_path}/${file}"
+
+        if [[ "$copied_other" == false ]]; then
+            copied_other=true
+            print_green "Copying gitignored files:" >&2
+        fi
+        echo "  ${file}" >&2
+    done
+}
+
 # Create a worktree for a branch
 # Usage: create_worktree "branch-name" [git_root_dir]
-# Creates worktree at <project>-worktrees/<sanitized-branch-name>
+# Creates worktree at <project>/.worktrees/<sanitized-branch-name>
 create_worktree() {
     local branch_name="$1"
     local git_root="${2:-$(get_main_repo_root)}"
@@ -406,6 +506,9 @@ create_worktree() {
 
     # Create the worktree (redirect output to stderr so it doesn't mix with return value)
     git worktree add "$worktree_path" "$branch_name" >&2
+
+    # Warm up the worktree with gitignored files from main repo
+    warmup_worktree "$worktree_path" "$git_root"
 
     echo "$worktree_path"
 }
