@@ -120,14 +120,21 @@ remove_worktree() {
 
 # Find and remove orphaned directories in the worktrees directory
 # These are leftover dirs that git worktree no longer tracks
+# Checks both legacy (<project>-worktrees) and new (<project>/.worktrees) locations
 # Usage: cleanup_orphaned_dirs <main_worktree_path>
 cleanup_orphaned_dirs() {
     local main_worktree="$1"
-    local worktrees_dir
-    worktrees_dir=$(get_worktrees_dir "$main_worktree")
+    local legacy_dir new_dir
+    legacy_dir=$(get_legacy_worktrees_dir "$main_worktree")
+    new_dir="${main_worktree}/.worktrees"
 
-    # No worktrees directory - nothing to clean
-    [[ -d "$worktrees_dir" ]] || return 0
+    # Collect all worktrees dirs that exist
+    local -a worktrees_dirs=()
+    [[ -d "$legacy_dir" ]] && worktrees_dirs+=("$legacy_dir")
+    [[ -d "$new_dir" ]] && worktrees_dirs+=("$new_dir")
+
+    # No worktrees directories - nothing to clean
+    [[ ${#worktrees_dirs[@]} -gt 0 ]] || return 0
 
     # Collect known worktree paths from git
     local -a known_paths=()
@@ -137,10 +144,11 @@ cleanup_orphaned_dirs() {
         fi
     done < <(git worktree list --porcelain)
 
-    # Check each directory in the worktrees dir
+    # Check each directory in all worktrees dirs
     local -a orphaned=()
-    local dir
-    for dir in "$worktrees_dir"/*/; do
+    local dir wt_dir
+    for wt_dir in "${worktrees_dirs[@]}"; do
+    for dir in "$wt_dir"/*/; do
         [[ -d "$dir" ]] || continue
         dir="${dir%/}"  # strip trailing slash
 
@@ -156,6 +164,7 @@ cleanup_orphaned_dirs() {
         if [[ "$is_known" == false ]]; then
             orphaned+=("$dir")
         fi
+    done
     done
 
     [[ ${#orphaned[@]} -gt 0 ]] || return 0

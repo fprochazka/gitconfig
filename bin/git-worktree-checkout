@@ -34,7 +34,8 @@ Behavior:
     - With -b, creates a new branch first (like git checkout -b)
 
 Worktree location:
-    <project-dir>/../<project>-worktrees/<sanitized-branch-name>
+    <project-dir>/.worktrees/<sanitized-branch-name>
+    (falls back to <project-dir>/../<project>-worktrees/ if it exists)
 
 Examples:
     git wt fp/new-feature          # Checkout existing branch into worktree

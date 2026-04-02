@@ -35,7 +35,8 @@ Arguments:
 
 Options:
     -w, --worktree-create   Create a git worktree for the branch
-                            Location: <project-dir>/../<project>-worktrees/<branch-dir>
+                            Location: <project-dir>/.worktrees/<branch-dir>
+                            (falls back to <project-dir>/../<project>-worktrees/ if it exists)
 
 Behavior:
     - If a branch for this issue already exists, checks it out

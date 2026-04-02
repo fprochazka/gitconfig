@@ -274,10 +274,10 @@ get_main_repo_root() {
     echo "${line#worktree }"
 }
 
-# Get the worktrees directory path for a git repository
-# Usage: get_worktrees_dir [git_root_dir]
+# Get the legacy worktrees directory path (old convention: sibling dir with -worktrees suffix)
+# Usage: get_legacy_worktrees_dir [git_root_dir]
 # Returns: /path/to/project/../project-worktrees
-get_worktrees_dir() {
+get_legacy_worktrees_dir() {
     local git_root="${1:-$(get_main_repo_root)}"
     local project_basename
     local parent_dir
@@ -286,6 +286,23 @@ get_worktrees_dir() {
     parent_dir=$(dirname "$git_root")
 
     echo "${parent_dir}/${project_basename}-worktrees"
+}
+
+# Get the worktrees directory path for a git repository
+# Usage: get_worktrees_dir [git_root_dir]
+# Returns: /path/to/project/.worktrees (new convention)
+# Falls back to legacy /path/to/project/../project-worktrees if it exists
+get_worktrees_dir() {
+    local git_root="${1:-$(get_main_repo_root)}"
+    local legacy_dir
+    legacy_dir=$(get_legacy_worktrees_dir "$git_root")
+
+    # Use legacy dir if it exists, otherwise use new convention
+    if [[ -d "$legacy_dir" ]]; then
+        echo "$legacy_dir"
+    else
+        echo "${git_root}/.worktrees"
+    fi
 }
 
 # Get list of all branches currently checked out in worktrees
