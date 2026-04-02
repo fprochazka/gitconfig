@@ -290,19 +290,12 @@ get_legacy_worktrees_dir() {
 
 # Get the worktrees directory path for a git repository
 # Usage: get_worktrees_dir [git_root_dir]
-# Returns: /path/to/project/.worktrees (new convention)
-# Falls back to legacy /path/to/project/../project-worktrees if it exists
+# Returns: /path/to/project/.worktrees
+# Note: existing worktrees at the legacy path are found via git worktree list,
+# this function only determines where NEW worktrees are created
 get_worktrees_dir() {
     local git_root="${1:-$(get_main_repo_root)}"
-    local legacy_dir
-    legacy_dir=$(get_legacy_worktrees_dir "$git_root")
-
-    # Use legacy dir if it exists, otherwise use new convention
-    if [[ -d "$legacy_dir" ]]; then
-        echo "$legacy_dir"
-    else
-        echo "${git_root}/.worktrees"
-    fi
+    echo "${git_root}/.worktrees"
 }
 
 # Get list of all branches currently checked out in worktrees
