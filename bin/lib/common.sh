@@ -375,6 +375,9 @@ find_worktree_for_branch() {
 # JetBrains IDE config directories - subdirs are symlinked, files are copied
 readonly JETBRAINS_CONFIG_DIRS=(.idea)
 
+# Files/dirs inside JetBrains config dirs to skip (IDE regenerates or personal state)
+readonly JETBRAINS_SKIP_ENTRIES=(workspace.xml shelf)
+
 # Build artifact directories excluded from worktree warmup
 readonly WARMUP_EXCLUDE_DIRS=(target node_modules build dist .gradle vendor __pycache__ .mypy_cache .pytest_cache .tox .venv venv)
 
@@ -414,6 +417,18 @@ warmup_worktree() {
         local subdir
         while IFS= read -r subdir; do
             [[ -n "$subdir" ]] || continue
+
+            # Skip entries that IDE regenerates or are personal state
+            local should_skip=false
+            local skip_entry
+            for skip_entry in "${JETBRAINS_SKIP_ENTRIES[@]}"; do
+                if [[ "$subdir" == "$skip_entry" ]]; then
+                    should_skip=true
+                    break
+                fi
+            done
+            [[ "$should_skip" == false ]] || continue
+
             if [[ -d "${git_root}/${jetbrains_dir}/${subdir}" ]] && [[ ! -e "${worktree_path}/${jetbrains_dir}/${subdir}" ]]; then
                 ln -s "${git_root}/${jetbrains_dir}/${subdir}" "${worktree_path}/${jetbrains_dir}/${subdir}"
                 symlinked_dirs+=("$subdir")
@@ -426,6 +441,17 @@ warmup_worktree() {
             [[ "$file" == "${jetbrains_dir}/"* ]] || continue
             local rel="${file#${jetbrains_dir}/}"
             local top_level="${rel%%/*}"
+
+            # Skip entries that IDE regenerates or are personal state
+            local should_skip=false
+            local skip_entry
+            for skip_entry in "${JETBRAINS_SKIP_ENTRIES[@]}"; do
+                if [[ "$top_level" == "$skip_entry" ]]; then
+                    should_skip=true
+                    break
+                fi
+            done
+            [[ "$should_skip" == false ]] || continue
 
             # Skip if this file is inside a symlinked subdir
             if [[ -d "${git_root}/${jetbrains_dir}/${top_level}" ]]; then
