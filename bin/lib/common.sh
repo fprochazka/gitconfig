@@ -379,7 +379,7 @@ readonly JETBRAINS_CONFIG_DIRS=(.idea)
 readonly JETBRAINS_SKIP_ENTRIES=(workspace.xml shelf)
 
 # Build artifact directories excluded from worktree warmup
-readonly WARMUP_EXCLUDE_DIRS=(target node_modules build dist .gradle vendor __pycache__ .mypy_cache .pytest_cache .tox .venv venv)
+readonly WARMUP_EXCLUDE_DIRS=(target node_modules build dist .gradle .next .nx vendor __pycache__ .mypy_cache .pytest_cache .tox .venv venv)
 
 # Warm up a new worktree by copying gitignored files from the main repo
 # JetBrains config dirs get special handling: subdirs are symlinked, files are copied
