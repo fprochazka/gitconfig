@@ -138,6 +138,9 @@ main() {
 
     # Create MR/PR
     vcs_mr_create "$mr_title" "$draft"
+
+    # Cache the MR/PR ID
+    vcs_get_branch_mr_id "$branch" >/dev/null 2>&1 || true
 }
 
 main "$@"
