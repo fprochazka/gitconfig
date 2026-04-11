@@ -104,6 +104,7 @@ This gitconfig provides many custom git commands and aliases for enhanced produc
 ### Merge/Pull Request Operations
 - **`git mr-status [branch]`** - Show MR/PR status for current branch (GitLab and GitHub)
 - **`git pr-status [branch]`** - Alias for `mr-status`
+- **`git get-branch-mr-id [branch]`** - Get cached MR/PR ID from git config (`branch.<name>.gitlab-mr-id` or `github-pr-id`)
 
 ### Issue Tracking Integration
 - **`git issue-branch <issue-id>`** - Create or checkout a branch for an issue (e.g., `fp/ENG-123-fix-login-bug`)

@@ -76,6 +76,9 @@
 	issue-branch = !~/.config/gitconfig/bin/git-issue-branch
 	issue-mr = !~/.config/gitconfig/bin/git-issue-mr
 
+	# MR/PR metadata
+	get-branch-mr-id = !~/.config/gitconfig/bin/git-get-branch-mr-id
+
 	# worktree management
 	wt = !~/.config/gitconfig/bin/git-worktree-checkout
 	wt-cleanup = !~/.config/gitconfig/bin/git-worktree-cleanup

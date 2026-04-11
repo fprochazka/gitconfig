@@ -117,6 +117,50 @@ vcs_mr_view() {
 }
 
 #
+# MR/PR ID lookup
+#
+
+# Get MR/PR ID for a branch (cached, with API fallback)
+# Usage: vcs_get_branch_mr_id "branch"
+# Returns: MR/PR ID (IID for GitLab, number for GitHub), or exits with 1
+# Caches successful lookups in git config. Callers handle their own caching for failures.
+vcs_get_branch_mr_id() {
+    local branch="$1"
+    local host
+    host=$(vcs_get_host)
+
+    # Check local cache first
+    local config_key
+    case "$host" in
+        gitlab) config_key="branch.${branch}.gitlab-mr-id" ;;
+        github) config_key="branch.${branch}.github-pr-id" ;;
+        *) return 1 ;;
+    esac
+
+    local cached_id
+    cached_id=$(git config --get "$config_key" 2>/dev/null || true)
+    if [[ -n "$cached_id" ]]; then
+        echo "$cached_id"
+        return 0
+    fi
+
+    # API lookup
+    local mr_id
+    case "$host" in
+        gitlab) mr_id=$(_gitlab_get_branch_mr_id "$branch") ;;
+        github) mr_id=$(_github_get_branch_pr_id "$branch") ;;
+    esac
+
+    if [[ -n "$mr_id" ]]; then
+        git config "$config_key" "$mr_id"
+        echo "$mr_id"
+        return 0
+    fi
+
+    return 1
+}
+
+#
 # Fork/upstream detection
 #
 
@@ -207,6 +251,19 @@ _gitlab_mr_view() {
     fi
 }
 
+_gitlab_get_branch_mr_id() {
+    local branch="$1"
+    local json
+    json=$(glab api "projects/:id/merge_requests?source_branch=${branch}&state=opened" 2>/dev/null || echo "[]")
+
+    local count
+    count=$(echo "$json" | jq 'length')
+
+    if [[ "$count" -eq 1 ]]; then
+        echo "$json" | jq -r '.[0].iid'
+    fi
+}
+
 _gitlab_detect_fork() {
     local json
     if ! json=$(glab repo view -F json 2>&1); then
@@ -273,6 +330,19 @@ _github_pr_view() {
         gh pr view "$branch" --json url,title,body,state,statusCheckRollup,headRefName,baseRefName,isCrossRepository,headRepositoryOwner 2>/dev/null
     else
         gh pr view --json url,title,body,state,statusCheckRollup,headRefName,baseRefName,isCrossRepository,headRepositoryOwner 2>/dev/null
+    fi
+}
+
+_github_get_branch_pr_id() {
+    local branch="$1"
+    local json
+    json=$(gh pr list --head "$branch" --state open --json number 2>/dev/null || echo "[]")
+
+    local count
+    count=$(echo "$json" | jq 'length')
+
+    if [[ "$count" -eq 1 ]]; then
+        echo "$json" | jq -r '.[0].number'
     fi
 }
 

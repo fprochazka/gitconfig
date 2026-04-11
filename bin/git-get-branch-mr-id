@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# git-get-branch-mr-id - Get the MR/PR ID associated with the current branch
+#
+# Usage: git get-branch-mr-id [branch]
+#
+# Looks up the MR/PR ID from git config cache first, then falls back to
+# querying the GitLab/GitHub API. Successful lookups are cached in git config.
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/vcs-hosting.sh"
+
+show_help() {
+    cat << 'EOF'
+Usage: git get-branch-mr-id [branch]
+
+Get the MR/PR ID associated with a branch.
+
+Arguments:
+    branch    Branch name (default: current branch)
+
+Looks up the MR/PR ID from git config cache first
+(branch.<name>.gitlab-mr-id or branch.<name>.github-pr-id),
+then falls back to querying the GitLab/GitHub API.
+
+Successful lookups are cached in git config.
+
+Exit codes:
+    0    ID found and printed
+    1    No ID found (main branch, or no open MR/PR)
+
+Examples:
+    git get-branch-mr-id
+    git get-branch-mr-id fp/SCEX-123-some-feature
+EOF
+}
+
+main() {
+    if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+        show_help
+        exit 0
+    fi
+
+    require_git_repo
+
+    local branch="${1:-$(get_current_branch)}"
+
+    if is_main_branch "$branch"; then
+        return 1
+    fi
+
+    vcs_get_branch_mr_id "$branch"
+}
+
+main "$@"
