@@ -11,6 +11,8 @@
 detect_terminal() {
     if [[ -n "${GUAKE_TAB_UUID:-}" ]] || [[ "${TERM_PROGRAM:-}" == "guake" ]]; then
         echo "guake"
+    elif [[ -n "${WARP_IS_LOCAL_SHELL_SESSION:-}" ]] || [[ "${TERM_PROGRAM:-}" == "WarpTerminal" ]]; then
+        echo "warp"
     elif [[ -n "${TMUX:-}" ]]; then
         echo "tmux"
     elif [[ -n "${KITTY_WINDOW_ID:-}" ]]; then
@@ -36,7 +38,7 @@ open_terminal_tab() {
     terminal=$(detect_terminal)
 
     case "$terminal" in
-        guake|tmux|kitty|wezterm|gnome-terminal|konsole)
+        guake|warp|tmux|kitty|wezterm|gnome-terminal|konsole)
             echo ""
             print_green "Opening in new terminal tab: $directory"
             ;;
@@ -45,6 +47,9 @@ open_terminal_tab() {
     case "$terminal" in
         guake)
             _open_tab_guake "$directory"
+            ;;
+        warp)
+            _open_tab_warp "$directory"
             ;;
         tmux)
             _open_tab_tmux "$directory"
@@ -88,6 +93,19 @@ _open_tab_guake() {
     guake --new-tab="" --show >/dev/null 2>&1
     sleep 0.2
     guake --execute-command="cd ${directory@Q}" >/dev/null 2>&1
+}
+
+_open_tab_warp() {
+    local directory="$1"
+
+    if ! command -v xdg-open >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # Warp URI scheme: https://docs.warp.dev/terminal/more-features/uri-scheme
+    # Only spaces need encoding for typical absolute paths.
+    local encoded="${directory// /%20}"
+    xdg-open "warp://action/new_tab?path=${encoded}" >/dev/null 2>&1
 }
 
 _open_tab_tmux() {
