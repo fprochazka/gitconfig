@@ -495,6 +495,49 @@ warmup_worktree() {
     done
 }
 
+# Propagate mise trust from the source repo to a new worktree
+#
+# mise trusts config files by canonicalized absolute path, so a worktree's
+# checkout of the same .mise.toml is a different trust key and would prompt
+# again on first use. If the source repo's own config is trusted, trust the
+# worktree's copy too.
+#
+# Silent no-op if mise is not installed or the source repo isn't trusted.
+# Trust on parent dirs already applies to the worktree path transitively,
+# so we only act when the project root itself is explicitly trusted.
+#
+# Usage: maybe_propagate_mise_trust <git_root> <worktree_path>
+maybe_propagate_mise_trust() {
+    local git_root="$1"
+    local worktree_path="$2"
+
+    command -v mise >/dev/null 2>&1 || return 0
+
+    # `mise trust --show -C <dir>` prints "<path>: trusted|untrusted" for each
+    # mise config in <dir> and its parents. Paths starting with $HOME are
+    # abbreviated with a leading ~.
+    local show_output
+    show_output=$(mise trust --show -C "$git_root" 2>/dev/null || true)
+
+    local found_trusted=false
+    local line
+    while IFS= read -r line; do
+        [[ "$line" == "~"* ]] && line="${HOME}${line:1}"
+        if [[ "$line" == "${git_root}: trusted" ]]; then
+            found_trusted=true
+            break
+        fi
+    done <<< "$show_output"
+
+    [[ "$found_trusted" == true ]] || return 0
+
+    if mise trust -C "$worktree_path" >/dev/null 2>&1; then
+        print_green "mise: trusted config in worktree" >&2
+    else
+        warn "mise: failed to trust config in worktree: $worktree_path"
+    fi
+}
+
 # Create a worktree for a branch
 # Usage: create_worktree "branch-name" [git_root_dir]
 # Creates worktree at <project>/.worktrees/<sanitized-branch-name>
@@ -525,6 +568,9 @@ create_worktree() {
 
     # Warm up the worktree with gitignored files from main repo
     warmup_worktree "$worktree_path" "$git_root"
+
+    # Propagate mise trust if the source repo's config is trusted
+    maybe_propagate_mise_trust "$git_root" "$worktree_path"
 
     echo "$worktree_path"
 }
