@@ -49,6 +49,7 @@ docker-compose.local.yml
 # Claude Code local files
 **/.claude/settings.local.json
 **/.claude/plans/
+**/.claude/review-report/
 
 # Well-known files that we know must be commited
 !gradle-wrapper.jar
