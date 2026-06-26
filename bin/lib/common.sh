@@ -538,6 +538,159 @@ maybe_propagate_mise_trust() {
     fi
 }
 
+# Print the candidate Claude Code config files, one per line, deduped, existing only
+#
+# Claude Code keeps per-directory project state in a `.projects` map inside one or
+# more `.claude.json` files: the default config in $HOME, an optional config under
+# $CLAUDE_CONFIG_DIR, and one per auth-switch profile under $HOME/.claude-profiles/.
+#
+# Usage: _claude_config_files
+_claude_config_files() {
+    local -a candidates=()
+
+    candidates+=("${HOME}/.claude.json")
+
+    if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+        candidates+=("${CLAUDE_CONFIG_DIR}/.claude.json")
+    fi
+
+    # The glob may not match any profile - guard it so set -e doesn't abort
+    local f
+    for f in "${HOME}"/.claude-profiles/*/.claude.json; do
+        [[ -e "$f" ]] && candidates+=("$f") || true
+    done
+
+    # Emit existing files, deduped, preserving first-seen order
+    local -a seen=()
+    for f in "${candidates[@]}"; do
+        [[ -f "$f" ]] || continue
+        local already=false
+        local s
+        for s in "${seen[@]}"; do
+            [[ "$s" == "$f" ]] && { already=true; break; }
+        done
+        [[ "$already" == true ]] && continue
+        seen+=("$f")
+        printf '%s\n' "$f"
+    done
+}
+
+# Keys copied from the root repo's project entry onto a new worktree's entry.
+# Only trust/onboarding state and MCP/tool config inherit - never session metrics
+# (last*), example files, or other per-directory bookkeeping.
+readonly CLAUDE_COPY_KEYS_JSON='[
+  "hasTrustDialogAccepted",
+  "hasCompletedProjectOnboarding",
+  "projectOnboardingSeenCount",
+  "hasClaudeMdExternalIncludesApproved",
+  "hasClaudeMdExternalIncludesWarningShown",
+  "allowedTools",
+  "enabledMcpjsonServers",
+  "disabledMcpjsonServers",
+  "mcpServers",
+  "mcpContextUris"
+]'
+
+# Propagate Claude Code trust/config from the root repo to a new worktree
+#
+# Claude Code trust is per-directory (keyed by absolute path in the `.projects`
+# map), so a fresh worktree is untrusted and re-prompts on first use. For each
+# config file, if the root repo's entry is trusted, copy the trust/onboarding
+# and MCP/tool keys onto the worktree's entry. The copy is gated per file: a
+# config where the root isn't trusted contributes nothing (no blind flip).
+#
+# Silent no-op if jq is missing or no config trusts the root.
+#
+# Usage: maybe_propagate_claude_trust <git_root> <worktree_path>
+maybe_propagate_claude_trust() {
+    local git_root="$1"
+    local worktree_path="$2"
+
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local updated=0
+    local f
+    while IFS= read -r f; do
+        # Gate: only inherit when the source entry exists and is trusted in this file
+        local trusted
+        trusted=$(jq -r --arg root "$git_root" '.projects[$root].hasTrustDialogAccepted // false' "$f" 2>/dev/null || echo false)
+        [[ "$trusted" == "true" ]] || continue
+
+        # Temp in the same directory as the target so the final mv is an atomic
+        # same-filesystem rename (mktemp's default /tmp would be cross-device)
+        local tmp
+        tmp=$(mktemp "$(dirname "$f")/.claude.json.XXXXXX") || { warn "claude: mktemp failed for $f"; continue; }
+
+        # Preserve original file mode for the atomic replacement
+        cp -p "$f" "$tmp" 2>/dev/null || { warn "claude: cp -p failed for $f"; rm -f "$tmp"; continue; }
+
+        if jq --arg root "$git_root" --arg wt "$worktree_path" --argjson keys "$CLAUDE_COPY_KEYS_JSON" '
+                (.projects[$root]) as $src
+                | ($src | with_entries(select([.key] | inside($keys)))) as $picked
+                | .projects[$wt] = ((.projects[$wt] // {}) + $picked)
+            ' "$f" > "$tmp" 2>/dev/null && jq empty "$tmp" >/dev/null 2>&1; then
+            if mv "$tmp" "$f"; then
+                updated=$((updated + 1))
+            else
+                warn "claude: failed to replace $f"
+                rm -f "$tmp"
+            fi
+        else
+            warn "claude: failed to update $f"
+            rm -f "$tmp"
+        fi
+    done < <(_claude_config_files)
+
+    if [[ "$updated" -gt 0 ]]; then
+        print_green "claude: trust+config inherited from root in ${updated} config(s) for worktree" >&2
+    fi
+}
+
+# Remove a directory's project entry from every Claude Code config file
+#
+# Symmetric cleanup for maybe_propagate_claude_trust: when a worktree is removed,
+# drop its `.projects[<dir>]` entry so stale per-directory state doesn't linger.
+#
+# Silent no-op if jq is missing or no config has an entry for the directory.
+#
+# Usage: remove_claude_project_entry <dir_path>
+remove_claude_project_entry() {
+    local dir_path="$1"
+
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local removed=0
+    local f
+    while IFS= read -r f; do
+        local exists
+        exists=$(jq -r --arg dir "$dir_path" 'if (.projects | has($dir)) then "true" else "false" end' "$f" 2>/dev/null || echo false)
+        [[ "$exists" == "true" ]] || continue
+
+        # Temp in the same directory as the target so the final mv is an atomic
+        # same-filesystem rename (mktemp's default /tmp would be cross-device)
+        local tmp
+        tmp=$(mktemp "$(dirname "$f")/.claude.json.XXXXXX") || { warn "claude: mktemp failed for $f"; continue; }
+
+        cp -p "$f" "$tmp" 2>/dev/null || { warn "claude: cp -p failed for $f"; rm -f "$tmp"; continue; }
+
+        if jq --arg dir "$dir_path" 'del(.projects[$dir])' "$f" > "$tmp" 2>/dev/null && jq empty "$tmp" >/dev/null 2>&1; then
+            if mv "$tmp" "$f"; then
+                removed=$((removed + 1))
+            else
+                warn "claude: failed to replace $f"
+                rm -f "$tmp"
+            fi
+        else
+            warn "claude: failed to update $f"
+            rm -f "$tmp"
+        fi
+    done < <(_claude_config_files)
+
+    if [[ "$removed" -gt 0 ]]; then
+        print_green "claude: removed project entry from ${removed} config(s)" >&2
+    fi
+}
+
 # Create a worktree for a branch
 # Usage: create_worktree "branch-name" [git_root_dir]
 # Creates worktree at <project>/.worktrees/<sanitized-branch-name>
@@ -571,6 +724,9 @@ create_worktree() {
 
     # Propagate mise trust if the source repo's config is trusted
     maybe_propagate_mise_trust "$git_root" "$worktree_path"
+
+    # Propagate Claude Code trust/config from the source repo
+    maybe_propagate_claude_trust "$git_root" "$worktree_path"
 
     echo "$worktree_path"
 }

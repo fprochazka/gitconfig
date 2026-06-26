@@ -95,6 +95,9 @@ remove_worktree() {
 
     print_green "Worktree removed successfully."
 
+    # Drop the worktree's Claude Code per-directory project entry
+    remove_claude_project_entry "$selected_path"
+
     # Optionally delete the branch if it exists
     if [[ "$selected_branch" != "detached" ]]; then
         local main_branch
@@ -182,6 +185,7 @@ cleanup_orphaned_dirs() {
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         for dir in "${orphaned[@]}"; do
             rm -rf "$dir"
+            remove_claude_project_entry "$dir"
             print_green "Removed: $(basename "$dir")/"
         done
         echo ""
