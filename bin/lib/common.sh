@@ -47,6 +47,125 @@ warn() {
 }
 
 #
+# Destructive operations
+#
+
+# Print the mount points at or below a directory (resolved), one per line.
+# Reads /proc/self/mountinfo and decodes its octal escapes. Returns non-zero
+# when the directory cannot be resolved or the mount table cannot be read, so
+# callers treat "unknown" like "has a mount" and refuse.
+# Usage: mounts_at_or_below <dir>
+mounts_at_or_below() {
+    local root target
+    root=$(realpath -e -- "$1") || return 1
+    [[ -r /proc/self/mountinfo ]] || return 1
+    while IFS=' ' read -r _ _ _ _ target _; do
+        target="${target//\\040/ }"
+        target="${target//\\011/$'\t'}"
+        target="${target//\\012/$'\n'}"
+        target="${target//\\134/\\}"
+        if [[ "$target" == "$root" || "$target" == "${root}/"* ]]; then
+            printf '%s\n' "$target"
+        fi
+    done < /proc/self/mountinfo
+}
+
+# Die unless nothing is mounted at or below a directory, so no recursive delete
+# (rm or git worktree remove --force) ever reaches into another file system
+# Usage: require_no_mounts <dir> <what is about to happen>
+require_no_mounts() {
+    local dir="$1" action="$2" mounts
+    mounts=$(mounts_at_or_below "$dir") || die "Cannot check $dir for mount points; refusing to ${action}"
+    if [[ -n "$mounts" ]]; then
+        # printf, not die's echo -e, so backslashes in mount paths print as they are
+        local mount
+        while IFS= read -r mount; do
+            printf '  %s\n' "$mount" >&2
+        done <<< "$mounts"
+        die "Refusing to ${action}: something is mounted at or inside it (listed above), unmount it first"
+    fi
+}
+
+# Recursively delete a directory that must lie strictly inside an allowed parent.
+# This is the only place where these scripts run `rm -rf`. Every guard dies
+# instead of warning, so a bad path stops the whole script.
+#
+# Refuses when the path is empty, relative, contains a newline, is a symlink
+# (trailing slashes are stripped first, so "link/" is refused too), does not
+# exist, resolves outside of (or to) the resolved allowed parent, is /, $HOME, or
+# one of the extra protected paths, or is an ancestor of any of them.
+# Also refuses when the directory is a mount point (its device differs from its
+# parent's) or anything is mounted inside it. rm runs from the resolved parent on
+# the bare name and with --one-file-system as a second line of defence.
+# Under DRY_RUN=true the guards still run, but nothing is deleted.
+#
+# Usage: safe_rm_rf <path> <allowed_parent> [protected_path...]
+safe_rm_rf() {
+    [[ $# -ge 2 ]] || die "safe_rm_rf: expected <path> <allowed_parent>"
+    local path="$1"
+    local allowed_parent="$2"
+    shift 2
+
+    [[ -n "$path" ]] || die "safe_rm_rf: refusing an empty path"
+    [[ -n "$allowed_parent" ]] || die "safe_rm_rf: refusing an empty allowed parent"
+    [[ "$path" != *$'\n'* && "$allowed_parent" != *$'\n'* ]] || die "safe_rm_rf: refusing a path with a newline"
+    [[ "$path" == /* ]] || die "safe_rm_rf: refusing a relative path: $path"
+    [[ "$allowed_parent" == /* ]] || die "safe_rm_rf: refusing a relative allowed parent: $allowed_parent"
+
+    # Strip trailing slashes: [[ -L "link/" ]] tests the link's target, not the link
+    path="${path%"${path##*[!/]}"}"
+    [[ -n "$path" ]] || die "safe_rm_rf: refusing /"
+    [[ ! -L "$path" ]] || die "safe_rm_rf: refusing a symlink: $path"
+
+    local resolved parent_resolved
+    resolved=$(realpath -e -- "$path") || die "safe_rm_rf: path does not exist: $path"
+    parent_resolved=$(realpath -e -- "$allowed_parent") || die "safe_rm_rf: allowed parent does not exist: $allowed_parent"
+    [[ -d "$resolved" ]] || die "safe_rm_rf: not a directory: $path"
+    [[ "$parent_resolved" != "/" ]] || die "safe_rm_rf: refusing / as the allowed parent"
+
+    [[ "$resolved" == "${parent_resolved}/"* ]] || die "safe_rm_rf: refusing $path, it is not strictly inside $allowed_parent"
+
+    local protected protected_resolved
+    for protected in / "$HOME" "$allowed_parent" "$@"; do
+        [[ -n "$protected" ]] || continue
+        protected_resolved=$(realpath -m -- "$protected")
+        [[ "$resolved" != "$protected_resolved" ]] || die "safe_rm_rf: refusing protected path: $path"
+        [[ "$protected_resolved" != "${resolved}/"* ]] || die "safe_rm_rf: refusing $path, it contains protected path $protected"
+    done
+
+    local resolved_parent resolved_name
+    resolved_parent=$(dirname -- "$resolved")
+    resolved_name=$(basename -- "$resolved")
+    [[ -n "$resolved_name" && "$resolved_name" != "." && "$resolved_name" != ".." ]] || die "safe_rm_rf: refusing $path"
+
+    # Both checks are needed: a FUSE or other-device mount changes %d, a same-fs
+    # bind mount keeps it and only shows up in mountinfo. (On btrfs a subvolume
+    # also changes %d and is refused, which fails safe.)
+    local dev parent_dev
+    dev=$(stat -c '%d' -- "$resolved") || die "safe_rm_rf: cannot stat $path"
+    parent_dev=$(stat -c '%d' -- "$resolved_parent") || die "safe_rm_rf: cannot stat the parent of $path"
+    [[ "$dev" == "$parent_dev" ]] || die "safe_rm_rf: refusing $path, it is a mount point"
+    require_no_mounts "$resolved" "delete $path"
+
+    if [[ "${DRY_RUN:-false}" == true ]]; then
+        print_dim "dry-run: rm -rf $resolved" >&2
+        return 0
+    fi
+    (cd -- "$resolved_parent" && [[ ! -L "$resolved_name" ]] && rm -rf --one-file-system -- "./${resolved_name}") \
+        || die "safe_rm_rf: failed to delete $resolved"
+}
+
+# Run a command that changes files or refs, or under DRY_RUN=true only print it
+# Usage: mutate <command> [args...]
+mutate() {
+    if [[ "${DRY_RUN:-false}" == true ]]; then
+        print_dim "dry-run: $(printf '%q ' "$@")" >&2
+        return 0
+    fi
+    "$@"
+}
+
+#
 # Git repository checks
 #
 

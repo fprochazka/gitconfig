@@ -13,9 +13,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
+# --dry-run: print every removal and move instead of doing it (read by safe_rm_rf/mutate)
+DRY_RUN=false
+
 show_help() {
     cat << 'EOF'
-Usage: git worktree-cleanup [-i|--interactive] [-l|--list] [--no-signals]
+Usage: git worktree-cleanup [-i|--interactive] [-l|--list] [-n|--dry-run] [--no-signals]
 
 Interactively remove git worktrees.
 
@@ -36,6 +39,7 @@ Each worktree also shows whether it may still be needed:
 Options:
     -i, --interactive   Force interactive selection even when in a worktree
     -l, --list          Only print the list and exit (read-only: no prune, no prompts)
+    -n, --dry-run       Print every removal and move instead of doing it
     --no-signals        Skip the keep/sessions scan (faster on hundreds of worktrees)
 
 Examples:
@@ -129,7 +133,9 @@ remove_worktree() {
     print_yellow "Removing worktree: $selected_path"
 
     # Remove the worktree, offering --force if it has modifications
-    if ! git worktree remove "$selected_path" 2>/dev/null; then
+    if [[ "$DRY_RUN" == true ]]; then
+        mutate git worktree remove "$selected_path"
+    elif ! git worktree remove "$selected_path" 2>/dev/null; then
         warn "Worktree contains modified or untracked files."
         echo -n "Force remove? [y/N]: "
         local confirm=""
@@ -141,10 +147,12 @@ remove_worktree() {
         fi
     fi
 
-    print_green "Worktree removed successfully."
+    if [[ "$DRY_RUN" == false ]]; then
+        print_green "Worktree removed successfully."
 
-    # Drop the worktree's Claude Code per-directory project entry
-    remove_claude_project_entry "$selected_path"
+        # Drop the worktree's Claude Code per-directory project entry
+        remove_claude_project_entry "$selected_path"
+    fi
 
     # Optionally delete the branch if it exists
     if [[ "$selected_branch" != "detached" ]]; then
@@ -154,16 +162,16 @@ remove_worktree() {
         # Check if branch is merged into main
         if is_branch_merged "$selected_branch" "$main_branch"; then
             # Auto-delete merged branches
-            git branch -d "$selected_branch"
-            print_green "Branch '$selected_branch' deleted (was merged into $main_branch)."
+            mutate git branch -d "$selected_branch"
+            [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted (was merged into $main_branch)."
         else
             # Ask for unmerged branches
             echo ""
             echo -n "Also delete unmerged branch '$selected_branch'? [y/N]: "
             read -r delete_branch
             if [[ "$delete_branch" =~ ^[Yy]$ ]]; then
-                git branch -D "$selected_branch"
-                print_green "Branch '$selected_branch' deleted."
+                mutate git branch -D "$selected_branch"
+                [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted."
             fi
         fi
     fi
@@ -187,43 +195,62 @@ cleanup_orphaned_dirs() {
     # No worktrees directories - nothing to clean
     [[ ${#worktrees_dirs[@]} -gt 0 ]] || return 0
 
-    # Collect known worktree paths from git
+    # Collect known worktree paths from git, resolved, so a symlinked worktrees dir
+    # (git stores the real path) does not make every live worktree look orphaned
     local -a known_paths=()
     while IFS= read -r line; do
         if [[ "$line" =~ ^worktree\ (.+)$ ]]; then
             known_paths+=("${BASH_REMATCH[1]}")
         fi
     done < <(git worktree list --porcelain)
+    local -a known_resolved=()
+    mapfile -d '' -t known_resolved < <(realpath -z -m -- "${known_paths[@]}")
+    [[ ${#known_resolved[@]} -eq ${#known_paths[@]} ]] || die "Failed to resolve the registered worktree paths"
 
     # Check each directory in all worktrees dirs
     local -a orphaned=()
-    local dir wt_dir
+    local -a unregistered=()
+    local dir wt_dir dir_resolved
     for wt_dir in "${worktrees_dirs[@]}"; do
     for dir in "$wt_dir"/*/; do
         [[ -d "$dir" ]] || continue
         dir="${dir%/}"  # strip trailing slash
+        [[ ! -L "$dir" ]] || continue  # never follow a symlink out of the worktrees dir
 
+        dir_resolved=$(realpath -e -- "$dir") || continue
         local is_known=false
         local known
-        for known in "${known_paths[@]}"; do
-            if [[ "$dir" == "$known" ]]; then
+        for known in "${known_resolved[@]}"; do
+            if [[ "$dir_resolved" == "$known" ]]; then
                 is_known=true
                 break
             fi
         done
 
         if [[ "$is_known" == false ]]; then
-            orphaned+=("$dir")
+            # A dir with .git is a worktree git lost track of, never an orphan to delete
+            if [[ -e "${dir}/.git" || -L "${dir}/.git" ]]; then
+                unregistered+=("$dir")
+            else
+                orphaned+=("$dir")
+            fi
         fi
     done
     done
+
+    if [[ ${#unregistered[@]} -gt 0 ]]; then
+        warn "${#unregistered[@]} worktree directories have .git but are not registered (try git worktree repair), left alone:"
+        for dir in "${unregistered[@]}"; do
+            echo "  $dir" >&2
+        done
+    fi
 
     [[ ${#orphaned[@]} -gt 0 ]] || return 0
 
     print_yellow "Found ${#orphaned[@]} orphaned worktree directories (not tracked by git):"
     echo ""
     for dir in "${orphaned[@]}"; do
-        echo "  $(basename "$dir")/"
+        echo "  ${dir}/"
     done
     echo ""
     echo -n "Remove all orphaned directories? [y/N]: "
@@ -232,9 +259,11 @@ cleanup_orphaned_dirs() {
 
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         for dir in "${orphaned[@]}"; do
-            rm -rf "$dir"
-            remove_claude_project_entry "$dir"
-            print_green "Removed: $(basename "$dir")/"
+            safe_rm_rf "$dir" "$(dirname "$dir")" "$main_worktree" "${worktrees_dirs[@]}"
+            if [[ "$DRY_RUN" == false ]]; then
+                remove_claude_project_entry "$dir"
+                print_green "Removed: $(basename "$dir")/"
+            fi
         done
         echo ""
     fi
@@ -264,6 +293,10 @@ main() {
                 show_signals=false
                 shift
                 ;;
+            --dry-run|-n)
+                DRY_RUN=true
+                shift
+                ;;
             *)
                 die "Unknown option: $1"
                 ;;
@@ -278,7 +311,11 @@ main() {
     # --list is strictly read-only: no pruning, no orphan cleanup, no prompts
     if [[ "$list_only" == false ]]; then
         # Prune stale worktree references (e.g. manually deleted directories)
-        git worktree prune
+        if [[ "$DRY_RUN" == true ]]; then
+            git worktree prune --dry-run --verbose
+        else
+            git worktree prune
+        fi
 
         # Clean up orphaned worktree directories (not tracked by git worktree list)
         cleanup_orphaned_dirs "$main_worktree"
