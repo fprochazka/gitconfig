@@ -121,6 +121,7 @@ These commands integrate with issue tracking systems (currently Linear) to:
 - **`git wt <branch>`** - Checkout branch into a worktree (like `git checkout` but for worktrees, doesn't touch current workdir)
 - **`git wt -b <branch>`** - Create new branch and checkout into a worktree
 - **`git wt-cleanup`** - Interactive worktree removal with branch info (upstream status, commit message)
+- **`git wt-cleanup -l`** - Only print the worktree list; each entry shows its unversioned files worth keeping (count, newest) and its Claude Code sessions (count, last), `--no-signals` skips that scan
 
 ### Other aliases & shortcuts
 

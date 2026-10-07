@@ -15,7 +15,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
     cat << 'EOF'
-Usage: git worktree-cleanup [-i|--interactive]
+Usage: git worktree-cleanup [-i|--interactive] [-l|--list] [--no-signals]
 
 Interactively remove git worktrees.
 
@@ -27,12 +27,21 @@ of all worktrees with branch information including:
   - Upstream tracking status (ahead/behind)
   - Last commit message
 
+Each worktree also shows whether it may still be needed:
+  - keep: unversioned files worth keeping (untracked or ignored files that are
+    not build output, IDE state, or an identical copy of the main repo's file;
+    fifos, sockets and empty directories are never kept)
+  - sessions: Claude Code sessions started in the worktree directory
+
 Options:
     -i, --interactive   Force interactive selection even when in a worktree
+    -l, --list          Only print the list and exit (read-only: no prune, no prompts)
+    --no-signals        Skip the keep/sessions scan (faster on hundreds of worktrees)
 
 Examples:
     git worktree-cleanup        # Clean current worktree, or list if in main repo
     git worktree-cleanup -i     # Always show interactive list
+    git worktree-cleanup -l     # Just print the list
 EOF
 }
 
@@ -70,6 +79,45 @@ get_worktree_branch_info() {
     fi
 
     echo -e "${COLOR_GREEN}${branch}${COLOR_RESET} ${commit_hash} ${upstream_info} ${commit_msg}"
+}
+
+# Compute keeper-file summaries for many worktrees in parallel (one git scan each)
+# Output lines: "<path>\t<keeper_count>\t<newest_mtime_epoch>\t<discarded_count>"
+# Usage: compute_keeper_summaries <main_repo_root> <worktree_path>...
+compute_keeper_summaries() {
+    local main_root="$1"
+    shift
+    [[ $# -gt 0 ]] || return 0
+
+    # shellcheck disable=SC2016 # expanded by the inner bash
+    local worker='source "$1"; read -r count newest discarded < <(worktree_keeper_summary "$3" "$2"); printf "%s\t%s\t%s\t%s\n" "$3" "$count" "$newest" "$discarded"'
+    printf '%s\0' "$@" \
+        | xargs -0 -r -n 1 -P "$(nproc 2>/dev/null || echo 4)" bash -c "$worker" _ "${SCRIPT_DIR}/lib/common.sh" "$main_root"
+}
+
+# Format the "do I still need this" signals of a worktree
+# Usage: format_worktree_signals <keeper_count> <keeper_newest> <session_count> <session_newest>
+format_worktree_signals() {
+    local keep_count="$1" keep_newest="$2" session_count="$3" session_newest="$4" discarded_count="${5:-0}"
+    local keep sessions
+
+    if [[ "$keep_count" == "?" ]]; then
+        keep="${COLOR_RED}keep: ? (could not list all unversioned files)${COLOR_RESET}"
+    elif [[ "$keep_count" -gt 0 ]]; then
+        keep="${COLOR_YELLOW}keep: ${keep_count} files, newest $(date -d "@${keep_newest}" +%F)${COLOR_RESET}"
+    elif [[ "$discarded_count" -gt 0 ]]; then
+        keep="${COLOR_DIM}nothing to keep, ${discarded_count} build/IDE/copied entries${COLOR_RESET}"
+    else
+        keep="${COLOR_DIM}no unversioned files${COLOR_RESET}"
+    fi
+
+    if [[ "$session_count" -gt 0 ]]; then
+        sessions="sessions: ${session_count}, last $(date -d "@${session_newest}" +%F)"
+    else
+        sessions="${COLOR_DIM}no sessions${COLOR_RESET}"
+    fi
+
+    echo -e "${keep} ${COLOR_DIM}·${COLOR_RESET} ${sessions}"
 }
 
 # Remove a worktree and optionally its branch
@@ -194,6 +242,8 @@ cleanup_orphaned_dirs() {
 
 main() {
     local force_interactive=false
+    local list_only=false
+    local show_signals=true
 
     # Handle flags
     while [[ $# -gt 0 ]]; do
@@ -204,6 +254,14 @@ main() {
                 ;;
             --interactive|-i)
                 force_interactive=true
+                shift
+                ;;
+            --list|-l)
+                list_only=true
+                shift
+                ;;
+            --no-signals)
+                show_signals=false
                 shift
                 ;;
             *)
@@ -217,18 +275,21 @@ main() {
     local main_worktree
     main_worktree=$(get_main_repo_root)
 
-    # Prune stale worktree references (e.g. manually deleted directories)
-    git worktree prune
+    # --list is strictly read-only: no pruning, no orphan cleanup, no prompts
+    if [[ "$list_only" == false ]]; then
+        # Prune stale worktree references (e.g. manually deleted directories)
+        git worktree prune
 
-    # Clean up orphaned worktree directories (not tracked by git worktree list)
-    cleanup_orphaned_dirs "$main_worktree"
+        # Clean up orphaned worktree directories (not tracked by git worktree list)
+        cleanup_orphaned_dirs "$main_worktree"
+    fi
 
     local current_worktree
     current_worktree=$(git rev-parse --show-toplevel)
 
     # If we're in a worktree (not main repo) and not forcing interactive mode,
     # offer to clean up the current worktree directly
-    if [[ "$current_worktree" != "$main_worktree" ]] && [[ "$force_interactive" == false ]]; then
+    if [[ "$current_worktree" != "$main_worktree" ]] && [[ "$force_interactive" == false ]] && [[ "$list_only" == false ]]; then
         local current_branch
         current_branch=$(get_current_branch)
 
@@ -305,7 +366,20 @@ main() {
     main_branch=$(get_main_branch)
     _mainline_file=$(mktemp)
     get_mainline_commits "$main_branch" > "$_mainline_file"
-    trap 'rm -f "$_mainline_file"' EXIT
+    trap 'rm -f "$_mainline_file" "${_session_index_file:-}"' EXIT
+
+    # Signals: unversioned keeper files (scanned in parallel) and Claude sessions per path
+    local -A keep_counts=() keep_newest=() keep_discarded=()
+    if [[ "$show_signals" == true ]]; then
+        _session_index_file=$(mktemp)
+        build_claude_session_index > "$_session_index_file"
+        local summary_path summary_count summary_newest summary_discarded
+        while IFS=$'\t' read -r summary_path summary_count summary_newest summary_discarded; do
+            keep_counts["$summary_path"]="$summary_count"
+            keep_newest["$summary_path"]="$summary_newest"
+            keep_discarded["$summary_path"]="$summary_discarded"
+        done < <(compute_keeper_summaries "$main_worktree" "${worktree_paths[@]}")
+    fi
 
     # Build display list
     echo ""
@@ -335,8 +409,15 @@ main() {
 
         printf "  %2d) %b%s\n" "$num" "$status_tag" "$info"
         printf "      ${COLOR_BOLD}%s${COLOR_RESET}\n" "$path"
+        if [[ "$show_signals" == true ]]; then
+            local session_count session_newest
+            read -r session_count session_newest < <(claude_sessions_for_path "$_session_index_file" "$path")
+            printf "      %s\n" "$(format_worktree_signals "${keep_counts[$path]:-?}" "${keep_newest[$path]:-0}" "$session_count" "$session_newest" "${keep_discarded[$path]:-0}")"
+        fi
         echo ""
     done
+
+    [[ "$list_only" == false ]] || exit 0
 
     # Prompt for selection
     local selection

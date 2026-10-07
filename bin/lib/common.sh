@@ -19,6 +19,7 @@ readonly COLOR_GREEN='\033[32m'
 readonly COLOR_YELLOW='\033[33m'
 readonly COLOR_PURPLE='\033[35m'
 readonly COLOR_BOLD='\033[1m'
+readonly COLOR_DIM='\033[2m'
 readonly COLOR_RESET='\033[0m'
 
 print_red()    { echo -e "${COLOR_RED}$*${COLOR_RESET}"; }
@@ -26,6 +27,7 @@ print_green()  { echo -e "${COLOR_GREEN}$*${COLOR_RESET}"; }
 print_yellow() { echo -e "${COLOR_YELLOW}$*${COLOR_RESET}"; }
 print_purple() { echo -e "${COLOR_PURPLE}$*${COLOR_RESET}"; }
 print_bold()   { echo -e "${COLOR_BOLD}$*${COLOR_RESET}"; }
+print_dim()    { echo -e "${COLOR_DIM}$*${COLOR_RESET}"; }
 
 #
 # Error handling
@@ -688,6 +690,203 @@ remove_claude_project_entry() {
 
     if [[ "$removed" -gt 0 ]]; then
         print_green "claude: removed project entry from ${removed} config(s)" >&2
+    fi
+}
+
+#
+# Worktree signals: unversioned files worth keeping, Claude sessions
+#
+
+# Marker written at the root of a removed worktree whose unversioned files were kept in place
+readonly WORKTREE_ARCHIVED_MARKER=".worktree-archived"
+
+# Unversioned paths that are build output or IDE state, never worth keeping.
+# Directory names match at any depth, suffixes match the end of file names.
+readonly KEEPER_EXCLUDE_DIRS=(.worktrees build .gradle .kotlin out target node_modules .next .nx dist coverage .venv __pycache__ .pytest_cache .ruff_cache .mypy_cache .idea .settings)
+readonly KEEPER_EXCLUDE_SUFFIXES=(.class .project .classpath .factorypath .flattened-pom.xml)
+
+# ERE matching relative paths excluded from keeper files
+_keeper_exclude_regex() {
+    local re="^${WORKTREE_ARCHIVED_MARKER//./\\.}$"
+    local entry
+    for entry in "${KEEPER_EXCLUDE_DIRS[@]}"; do
+        re="${re}|(^|/)${entry//./\\.}(/|$)"
+    done
+    for entry in "${KEEPER_EXCLUDE_SUFFIXES[@]}"; do
+        re="${re}|${entry//./\\.}$"
+    done
+    echo "$re"
+}
+
+# List a worktree's "keeper" files: untracked and ignored files that are not build
+# output (KEEPER_EXCLUDE_*), and not an identical copy of the same path in the main
+# repo (warmup_worktree copies those in, so they carry no worktree-specific value).
+# Ignored directories are listed collapsed by git, so build output is never walked;
+# collapsed directories that are not excluded (e.g. .claude/plans/) are expanded.
+# Git may list a collapsed directory and its subdirectory both, hence the dedupe.
+#
+# Everything left out (excluded entries, pruned directories, identical copies) is
+# appended NUL-delimited to <discarded_file> when given, so a caller can show what
+# a forced removal would delete.
+#
+# Fifos, sockets and empty directories are neither kept nor listed as discarded.
+#
+# Returns non-zero when any part of the worktree could not be listed (git failure,
+# unreadable directory, file vanishing mid-walk). The output is then incomplete and
+# must never be used to decide what survives a removal.
+#
+# Output: NUL-delimited paths relative to the worktree root
+# Usage: list_worktree_keeper_files <worktree_path> [main_repo_root] [discarded_file]
+list_worktree_keeper_files() {
+    local worktree_path="$1"
+    local main_root="${2:-}"
+    local discarded_file="${3:-/dev/null}"
+    local exclude_re
+    exclude_re=$(_keeper_exclude_regex)
+
+    # find arguments pruning excluded directories while expanding a collapsed dir
+    local -a prune_args=()
+    local dir
+    for dir in "${KEEPER_EXCLUDE_DIRS[@]}"; do
+        prune_args+=(-name "$dir" -o)
+    done
+    unset 'prune_args[${#prune_args[@]}-1]'
+
+    local raw_file expanded_file candidates_file
+    raw_file=$(mktemp) || return 1
+    expanded_file=$(mktemp) || { rm -f -- "$raw_file"; return 1; }
+    candidates_file=$(mktemp) || { rm -f -- "$raw_file" "$expanded_file"; return 1; }
+
+    local failed=0
+    if ! git -C "$worktree_path" ls-files -z --others --exclude-standard > "$raw_file" \
+        || ! git -C "$worktree_path" ls-files -z --others --ignored --exclude-standard --directory >> "$raw_file"; then
+        warn "Cannot list the unversioned files of $worktree_path"
+        failed=1
+    fi
+
+    local entry path
+    while IFS= read -r -d '' entry; do
+        if [[ "$entry" =~ $exclude_re ]]; then
+            printf '%s\0' "$entry" >> "$discarded_file"
+        elif [[ "$entry" == */ ]]; then
+            # The "./" prefix keeps an entry starting with "-" from being parsed as a
+            # find option. Pruned directories are printed with a trailing "/".
+            if ! (cd -- "$worktree_path" && find "./${entry%/}" -type d \( "${prune_args[@]}" \) -prune -printf '%p/\0' -o \( -type f -o -type l \) -printf '%p\0') > "$expanded_file"; then
+                warn "Cannot list everything under ${worktree_path}/${entry}"
+                failed=1
+            fi
+            while IFS= read -r -d '' path; do
+                path="${path#./}"
+                if [[ "$path" == */ ]] || [[ "$path" =~ $exclude_re ]]; then
+                    printf '%s\0' "$path" >> "$discarded_file"
+                else
+                    printf '%s\0' "$path" >> "$candidates_file"
+                fi
+            done < "$expanded_file"
+        else
+            printf '%s\0' "$entry" >> "$candidates_file"
+        fi
+    done < "$raw_file"
+
+    sort -zu "$candidates_file" | while IFS= read -r -d '' entry; do
+        if [[ -n "$main_root" ]] && _is_same_as_main_repo "$worktree_path" "$main_root" "$entry"; then
+            printf '%s\0' "$entry" >> "$discarded_file"
+            continue
+        fi
+        printf '%s\0' "$entry"
+    done
+    [[ "${PIPESTATUS[0]}" -eq 0 ]] || failed=1
+
+    rm -f -- "$raw_file" "$expanded_file" "$candidates_file"
+    return "$failed"
+}
+
+# True when <rel> exists in the main repo with identical content (or symlink target).
+# GNU cmp -s returns at once for regular files of different sizes.
+_is_same_as_main_repo() {
+    local worktree_path="$1" main_root="$2" rel="$3"
+    local wt_file="${worktree_path}/${rel}" main_file="${main_root}/${rel}"
+    if [[ -L "$wt_file" ]]; then
+        [[ -L "$main_file" ]] && [[ "$(readlink "$wt_file")" == "$(readlink "$main_file")" ]]
+    else
+        [[ -f "$main_file" ]] && [[ ! -L "$main_file" ]] && cmp -s -- "$wt_file" "$main_file"
+    fi
+}
+
+# Print "<count> <newest_mtime_epoch> <discarded_count>" of a worktree's keeper
+# files ("0 0 N" when there is nothing to keep, "? 0 0" when the worktree could not
+# be fully listed). discarded_count counts the unversioned entries removing the
+# worktree would delete: build output, IDE state, copies identical to the main repo.
+# Usage: worktree_keeper_summary <worktree_path> [main_repo_root]
+worktree_keeper_summary() {
+    local worktree_path="$1"
+    local main_root="${2:-}"
+    local list_file discarded_file discarded_count summary
+    list_file=$(mktemp) || { echo "? 0 0"; return 0; }
+    discarded_file=$(mktemp) || { rm -f -- "$list_file"; echo "? 0 0"; return 0; }
+    if ! list_worktree_keeper_files "$worktree_path" "$main_root" "$discarded_file" > "$list_file" 2>/dev/null; then
+        rm -f -- "$list_file" "$discarded_file"
+        echo "? 0 0"
+        return 0
+    fi
+    discarded_count=$(tr -cd '\0' < "$discarded_file" | wc -c)
+    summary=$( (cd -- "$worktree_path" && xargs -0 -r stat -c '%Y' -- < "$list_file" 2>/dev/null || true) \
+        | awk 'BEGIN { n = 0; max = 0 } { n++; if ($1 > max) max = $1 } END { print n, max }')
+    rm -f -- "$list_file" "$discarded_file"
+    echo "$summary $discarded_count"
+}
+
+# Claude Code project directory name for a path: every non-alphanumeric char
+# becomes '-'; names over 200 chars are cut to 200 and get a '-<hash>' suffix
+# Usage: claude_project_slug <dir_path>
+claude_project_slug() {
+    local path="$1"
+    echo "${path//[^a-zA-Z0-9]/-}"
+}
+
+# Print the distinct Claude Code projects directories (default, $CLAUDE_CONFIG_DIR,
+# auth-switch profiles), resolved through symlinks, one per line
+_claude_projects_dirs() {
+    local -a candidates=("${HOME}/.claude/projects")
+    [[ -n "${CLAUDE_CONFIG_DIR:-}" ]] && candidates+=("${CLAUDE_CONFIG_DIR}/projects")
+    local d
+    for d in "${HOME}"/.claude-profiles/*/projects; do
+        [[ -d "$d" ]] && candidates+=("$d") || true
+    done
+    for d in "${candidates[@]}"; do
+        [[ -d "$d" ]] && readlink -f "$d" || true
+    done | sort -u
+}
+
+# Print a session index "<slug>\t<session_count>\t<newest_mtime_epoch>" for every
+# Claude Code project directory, aggregated across all configs. Sessions are the
+# top-level *.jsonl transcripts of the project directory.
+# Usage: build_claude_session_index > index_file
+build_claude_session_index() {
+    local -a dirs=()
+    local d
+    while IFS= read -r d; do
+        dirs+=("$d")
+    done < <(_claude_projects_dirs)
+    [[ ${#dirs[@]} -gt 0 ]] || return 0
+
+    find "${dirs[@]}" -mindepth 2 -maxdepth 2 -name '*.jsonl' -printf '%T@\t%h\n' 2>/dev/null \
+        | awk -F'\t' '{
+            n = split($2, parts, "/"); slug = parts[n]; t = int($1)
+            count[slug]++; if (t > newest[slug]) newest[slug] = t
+        } END { for (s in count) printf "%s\t%d\t%d\n", s, count[s], newest[s] }'
+}
+
+# Look up "<session_count> <newest_mtime_epoch>" for a path in a session index file
+# Usage: claude_sessions_for_path <index_file> <dir_path>
+claude_sessions_for_path() {
+    local index_file="$1"
+    local slug
+    slug=$(claude_project_slug "$2")
+    if [[ ${#slug} -le 200 ]]; then
+        awk -F'\t' -v slug="$slug" '$1 == slug { n += $2; if ($3 > t) t = $3 } END { print n + 0, t + 0 }' "$index_file"
+    else
+        awk -F'\t' -v prefix="${slug:0:200}-" 'index($1, prefix) == 1 { n += $2; if ($3 > t) t = $3 } END { print n + 0, t + 0 }' "$index_file"
     fi
 }
 
