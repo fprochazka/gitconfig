@@ -23,6 +23,10 @@ unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
 # --dry-run: print every removal and move instead of doing it (read by safe_rm_rf/mutate)
 DRY_RUN=false
 
+# Set when several worktrees are removed at once: offers "a" (yes for all) on the keep-files prompt
+MULTI_REMOVAL=false
+KEEP_FILES_FOR_ALL=false
+
 # Kept files written this recently make the removal ask once more: a session may still be running there
 RECENT_WRITE_SECONDS=600
 
@@ -45,6 +49,9 @@ Each worktree also shows whether it may still be needed:
     not build output, IDE state, or an identical copy of the main repo's file;
     fifos, sockets and empty directories are never kept)
   - sessions: Claude Code sessions started in the worktree directory
+
+Select one worktree or several at once ("3 7 12-40"); the whole selection is
+validated and confirmed before anything is removed.
 
 Options:
     -i, --interactive   Force interactive selection even when in a worktree
@@ -326,7 +333,7 @@ remove_worktree() {
         done
         [[ ${#keepers[@]} -le 10 ]] || echo "  … and $(( ${#keepers[@]} - 10 )) more"
 
-        # A Claude session or an editor may still be writing here
+        # A Claude session or an editor may still be writing here; asked even under "yes for all"
         local newest age
         newest=$(newest_mtime "$selected_path" "${keepers[@]}")
         age=$(( $(date +%s) - newest ))
@@ -337,10 +344,22 @@ remove_worktree() {
             read -r recent_answer || true
             [[ "$recent_answer" =~ ^[Yy]$ ]] || die "Aborted."
         fi
-        echo -n "Keep them in place after removing the worktree? [Y/n]: "
-        local keep_answer=""
-        read -r keep_answer || true
-        [[ "$keep_answer" =~ ^[Nn]$ ]] || keep_files=true
+        if [[ "$KEEP_FILES_FOR_ALL" == true ]]; then
+            echo "Keeping them in place (yes for all)."
+            keep_files=true
+        else
+            if [[ "$MULTI_REMOVAL" == true ]]; then
+                echo -n "Keep them in place after removing the worktree? [Y/n/a=yes for all]: "
+            else
+                echo -n "Keep them in place after removing the worktree? [Y/n]: "
+            fi
+            local keep_answer=""
+            read -r keep_answer || true
+            [[ "$keep_answer" =~ ^[Nn]$ ]] || keep_files=true
+            if [[ "$MULTI_REMOVAL" == true ]] && [[ "$keep_answer" =~ ^[Aa]$ ]]; then
+                KEEP_FILES_FOR_ALL=true
+            fi
+        fi
     fi
 
     # Changes a forced removal would discard, including ones git status does not show
@@ -416,13 +435,59 @@ remove_worktree() {
             # Ask for unmerged branches
             echo ""
             echo -n "Also delete unmerged branch '$selected_branch'? [y/N]: "
-            read -r delete_branch
+            local delete_branch=""
+            read -r delete_branch || true
             if [[ "$delete_branch" =~ ^[Yy]$ ]]; then
                 mutate git branch -D "$selected_branch"
                 [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted."
             fi
         fi
     fi
+}
+
+# Parse a selection like "3 7 12-40" (spaces or commas) into unique 0-based
+# indexes in the given order. Every token is validated before anything is
+# printed, so one bad token rejects the whole selection.
+# Usage: parse_selection <selection> <count>
+parse_selection() {
+    local selection="$1"
+    local count="$2"
+    local -a tokens=()
+    read -ra tokens <<< "${selection//,/ }"
+    [[ ${#tokens[@]} -gt 0 ]] || die "Empty selection"
+
+    local -A seen=()
+    local -a indexes=()
+    local token from to n
+    for token in "${tokens[@]}"; do
+        if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            from="${BASH_REMATCH[1]}"
+            to="${BASH_REMATCH[2]}"
+        elif [[ "$token" =~ ^[0-9]+$ ]]; then
+            from="$token"
+            to="$token"
+        else
+            die "Invalid selection: $token"
+        fi
+        # Strip leading zeros and reject numbers longer than the count before any
+        # arithmetic, which would wrap a 20-digit number around to a valid index
+        from="${from#"${from%%[!0]*}"}"
+        to="${to#"${to%%[!0]*}"}"
+        if [[ -z "$from" || -z "$to" || ${#from} -gt ${#count} || ${#to} -gt ${#count} ]]; then
+            die "Selection out of range: $token (1-${count})"
+        fi
+        if (( from < 1 || to > count || from > to )); then
+            die "Selection out of range: $token (1-${count})"
+        fi
+        for (( n = from; n <= to; n++ )); do
+            if [[ -z "${seen[$n]:-}" ]]; then
+                seen[$n]=1
+                indexes+=($((n - 1)))
+            fi
+        done
+    done
+
+    printf '%s\n' "${indexes[@]}"
 }
 
 # Find and remove orphaned directories in the worktrees directory
@@ -731,24 +796,35 @@ main() {
 
     # Prompt for selection
     local selection
-    echo -n "Enter number to remove (Ctrl+C to cancel): "
-    read -r selection
+    echo -n "Enter numbers to remove, e.g. 3 7 12-40 (Ctrl+C to cancel): "
+    read -r selection || true
 
-    # Validate selection
-    if ! [[ "$selection" =~ ^[0-9]+$ ]]; then
-        die "Invalid selection: $selection"
+    # Validate the whole selection before removing anything
+    local parsed
+    parsed=$(parse_selection "$selection" "${#worktree_paths[@]}")
+    local -a selected_indexes=()
+    mapfile -t selected_indexes <<< "$parsed"
+
+    local index
+    if [[ ${#selected_indexes[@]} -gt 1 ]]; then
+        echo ""
+        print_bold "Selected ${#selected_indexes[@]} worktrees:"
+        for index in "${selected_indexes[@]}"; do
+            printf "  %2d) %s\n" $((index + 1)) "${worktree_paths[$index]}"
+        done
+        echo ""
+        echo -n "Remove these ${#selected_indexes[@]} worktrees? [y/N]: "
+        local confirm=""
+        read -r confirm || true
+        [[ "$confirm" =~ ^[Yy]$ ]] || die "Aborted."
+        MULTI_REMOVAL=true
     fi
 
-    local index=$((selection - 1))
-    if [[ $index -lt 0 ]] || [[ $index -ge ${#worktree_paths[@]} ]]; then
-        die "Selection out of range: $selection"
-    fi
-
-    local selected_path="${worktree_paths[$index]}"
-    local selected_branch="${worktree_branches[$index]:-detached}"
-
-    echo ""
-    remove_worktree "$selected_path" "$selected_branch"
+    # Any failure stops the run (set -e), leaving the remaining worktrees untouched
+    for index in "${selected_indexes[@]}"; do
+        echo ""
+        remove_worktree "${worktree_paths[$index]}" "${worktree_branches[$index]:-detached}"
+    done
 }
 
 main "$@"

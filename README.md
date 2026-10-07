@@ -121,6 +121,7 @@ These commands integrate with issue tracking systems (currently Linear) to:
 - **`git wt <branch>`** - Checkout branch into a worktree (like `git checkout` but for worktrees, doesn't touch current workdir)
 - **`git wt -b <branch>`** - Create new branch and checkout into a worktree
 - **`git wt-cleanup`** - Interactive worktree removal with branch info (upstream status, commit message). A worktree with unversioned files worth keeping (e.g. `.claude/` plans) can be removed with those files kept at their original path; the dir gets a `.worktree-archived` marker, orphan cleanup skips it, and a later `git wt <branch>` checks out into it again and restores the files (a checked-out file is never overwritten, the archived one is kept as `<name>.archived`). Kept files are hard-linked during the removal, so a worktree whose kept files belong to another user (e.g. written by docker as root), or with a mount inside it, is refused
+- **`git wt-cleanup`** then `3 7 12-40` - Remove several worktrees at once; the selection is validated and confirmed once, and the keep-files prompt accepts `a` (yes for all)
 - **`git wt-cleanup -l`** - Only print the worktree list; each entry shows its unversioned files worth keeping (count, newest) and its Claude Code sessions (count, last), `--no-signals` skips that scan
 - **`git wt-cleanup -n`** - Dry run: print every removal and move instead of doing it (orphaned directories, worktrees, branches)
 
