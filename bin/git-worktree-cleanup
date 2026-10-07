@@ -13,8 +13,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
+# Run as a git alias from inside a worktree, git exports GIT_DIR pointing at that
+# worktree's admin dir (.git/worktrees/<id>). It would override repository
+# discovery in every `git -C <other worktree>` call (reading the wrong index, so
+# the keeper listing would be wrong) and it dangles once that worktree is removed.
+# git already chdir'd to the worktree's top level, so discovery finds the same repo.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+
 # --dry-run: print every removal and move instead of doing it (read by safe_rm_rf/mutate)
 DRY_RUN=false
+
+# Kept files written this recently make the removal ask once more: a session may still be running there
+RECENT_WRITE_SECONDS=600
 
 show_help() {
     cat << 'EOF'
@@ -124,34 +134,272 @@ format_worktree_signals() {
     echo -e "${keep} ${COLOR_DIM}·${COLOR_RESET} ${sessions}"
 }
 
-# Remove a worktree and optionally its branch
+# Print the branch a worktree is on, or was on before a rebase or bisect that
+# detached it, or "detached"
+# Usage: worktree_branch_name <worktree_path>
+worktree_branch_name() {
+    local wt="$1" name state state_path
+    # Full ref, not --short: that prints heads/<name> when a tag has the same name
+    if name=$(git -C "$wt" symbolic-ref --quiet HEAD 2>/dev/null) && [[ "$name" == refs/heads/* ]]; then
+        echo "${name#refs/heads/}"
+        return 0
+    fi
+    for state in rebase-merge/head-name rebase-apply/head-name BISECT_START; do
+        state_path=$(git -C "$wt" rev-parse --path-format=absolute --git-path "$state" 2>/dev/null) || continue
+        [[ -f "$state_path" ]] || continue
+        read -r name < "$state_path" || true
+        name="${name#refs/heads/}"
+        if [[ -n "$name" ]] && git -C "$wt" show-ref --verify --quiet "refs/heads/${name}"; then
+            echo "$name"
+            return 0
+        fi
+    done
+    echo detached
+}
+
+# Remove a worktree but keep its keeper files at their original path: hard-link
+# them into a temp dir next to the worktree (same file system, so instant and
+# free), verify the copy, `git worktree remove --force`, recreate the dir with the
+# WORKTREE_ARCHIVED_MARKER first (so orphan cleanup leaves it alone even if this
+# is interrupted), move the files back, verify them in place, and only then
+# delete the temp dir. `git wt` restores the files on the next checkout. If
+# anything fails after the copy, the temp dir is kept and its path printed.
+# Usage: remove_worktree_keeping_files <worktree_path> <main_worktree> <rel_path>...
+remove_worktree_keeping_files() {
+    local wt="$1" main_worktree="$2"
+    shift 2
+
+    local branch_name commit_sha
+    branch_name=$(worktree_branch_name "$wt")
+    commit_sha=$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo unknown)
+
+    # Re-check right before the removal: git worktree remove --force does not stop
+    # at mount points, and the prompts in remove_worktree may have waited a while
+    require_no_mounts "$wt" "force-remove $wt"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        local rel
+        for rel in "$@"; do
+            print_dim "dry-run: keep ${wt}/${rel}"
+        done
+        print_dim "dry-run: hard-link the $# kept files into a temp dir in $(dirname "$wt")"
+        mutate git worktree remove --force "$wt"
+        print_dim "dry-run: recreate $wt with ${WORKTREE_ARCHIVED_MARKER}, move the $# kept files back, delete the temp dir"
+        return 0
+    fi
+
+    local tmp manifest
+    tmp=$(mktemp -d "$(dirname "$wt")/.worktree-keep.XXXXXX") || die "Failed to create a temp dir next to $wt; nothing was removed"
+    manifest=$(mktemp) || die "Failed to create a temp file; nothing was removed. Copy dir (empty): $tmp"
+
+    if ! (cd "$wt" && printf '%s\0' "$@" | xargs -0 -r cp -al --parents -t "$tmp" --); then
+        die "Hard-linking the kept files failed; the worktree was not removed. Files owned by another user cannot be hard-linked (fs.protected_hardlinks), nor can files on another file system. Partial copy: $tmp"
+    fi
+    _manifest_of_tree "$tmp" > "$manifest" || die "Cannot list the copy; the worktree was not removed. Copy: $tmp"
+    if ! cmp -s "$manifest" <(_manifest_of_paths "$wt" "$@"); then
+        die "The copy of the kept files does not match the originals; the worktree was not removed. Copy: $tmp"
+    fi
+
+    set_interrupt_note "The kept files of $wt are in $tmp (some may already be back in $wt)"
+
+    if ! git worktree remove --force "$wt"; then
+        die "git worktree remove failed; the kept files are safe in $tmp"
+    fi
+    if [[ -e "$wt" || -L "$wt" ]]; then
+        die "$wt still exists after git worktree remove; the kept files are safe in $tmp"
+    fi
+
+    mkdir -p -- "$wt" || die "Failed to recreate $wt; the kept files are safe in $tmp"
+    if ! (set -o noclobber; printf 'branch: %s\ncommit: %s\narchived: %s\n' "$branch_name" "$commit_sha" "$(date -Iseconds)" > "${wt}/${WORKTREE_ARCHIVED_MARKER}"); then
+        die "Failed to write ${wt}/${WORKTREE_ARCHIVED_MARKER}; the kept files are safe in $tmp"
+    fi
+
+    _move_tree_into "$tmp" "$wt" || die "Moving the kept files back failed; the rest of them are in $tmp"
+    if ! cmp -s "$manifest" <(_manifest_of_paths "$wt" "$@"); then
+        die "The kept files in $wt do not match the copy; whatever was not moved back is in $tmp"
+    fi
+    _tree_has_no_files "$tmp" || die "Files were left behind in $tmp after moving them back; check it before deleting"
+    rm -f -- "$manifest"
+    safe_rm_rf "$tmp" "$(dirname "$tmp")" "$main_worktree" "$wt"
+    clear_interrupt_note
+
+    print_green "Worktree removed, $# unversioned files kept in place: $wt"
+}
+
+# Print what a forced removal of a worktree would lose besides unversioned files:
+# changes to tracked files, an operation in progress, files git was told to
+# ignore changes of (skip-worktree, assume-unchanged), and commits no branch,
+# tag or remote reaches. Prints nothing when clean; a check that cannot run
+# prints a line too, so the caller asks before removing.
+# Usage: worktree_unsaved_state <worktree_path>
+worktree_unsaved_state() {
+    local wt="$1"
+    local status
+    status=$(git -C "$wt" status --porcelain --untracked-files=no) || { echo "  cannot read git status"; return 0; }
+    [[ -z "$status" ]] || printf '%s\n' "$status" | sed 's/^/  /'
+
+    local state state_path
+    if git -C "$wt" rev-parse --path-format=absolute --git-path HEAD >/dev/null 2>&1; then
+        for state in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+            state_path=$(git -C "$wt" rev-parse --path-format=absolute --git-path "$state" 2>/dev/null) || continue
+            [[ ! -e "$state_path" ]] || echo "  operation in progress: ${state}"
+        done
+    else
+        echo "  cannot check for operations in progress (git too old?)"
+    fi
+
+    # ls-files -v tags skip-worktree files with S and assume-unchanged ones in lowercase
+    local flagged
+    if flagged=$(git -C "$wt" ls-files -v); then
+        printf '%s\n' "$flagged" | awk '/^S / { print "  skip-worktree: " substr($0, 3) } /^[a-z] / { print "  assume-unchanged: " substr($0, 3) }'
+    else
+        echo "  cannot check for skip-worktree and assume-unchanged files"
+    fi
+
+    local unreachable
+    if unreachable=$(git -C "$wt" rev-list --count HEAD --not --branches --tags --remotes 2>/dev/null); then
+        [[ "$unreachable" -eq 0 ]] || echo "  ${unreachable} commits at HEAD are on no branch, tag or remote"
+    else
+        echo "  cannot check for commits only reachable from HEAD"
+    fi
+    return 0
+}
+
+# Print the newest mtime (epoch) of the given files under a root, 0 when none
+# Usage: newest_mtime <root> <rel_path>...
+newest_mtime() {
+    local root="$1"
+    shift
+    { (cd -- "$root" && printf '%s\0' "$@" | xargs -0 -r stat -c '%Y' -- 2>/dev/null) || true; } \
+        | awk 'BEGIN { max = 0 } { if ($1 > max) max = $1 } END { print max }'
+}
+
+# Remove a worktree and optionally its branch. When the worktree has keeper
+# files, offers to keep them in place (see remove_worktree_keeping_files).
 # Usage: remove_worktree <path> <branch>
 remove_worktree() {
     local selected_path="$1"
     local selected_branch="$2"
+    local main_worktree
+    main_worktree=$(get_main_repo_root)
+
+    # The worktree may be the current directory, and after its removal (or its
+    # recreation as a kept-files dir without .git) git can no longer find the repo
+    # from there; every git call below, branch handling included, runs from the main repo
+    cd "$main_worktree" || die "Failed to cd into $main_worktree"
 
     print_yellow "Removing worktree: $selected_path"
 
-    # Remove the worktree, offering --force if it has modifications
-    if [[ "$DRY_RUN" == true ]]; then
-        mutate git worktree remove "$selected_path"
-    elif ! git worktree remove "$selected_path" 2>/dev/null; then
-        warn "Worktree contains modified or untracked files."
-        echo -n "Force remove? [y/N]: "
-        local confirm=""
-        read -r confirm || true
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            git worktree remove --force "$selected_path"
-        else
-            die "Aborted."
-        fi
+    # A registered worktree whose directory is gone (prunable) has nothing to remove or check
+    [[ -d "$selected_path" ]] || die "$selected_path does not exist; run without --dry-run so git worktree prune drops it"
+
+    # git worktree remove, forced or not, deletes ignored files and does not stop at mount points
+    require_no_mounts "$selected_path" "remove $selected_path"
+
+    # A list that could not be completed must never decide what survives a forced removal
+    local keepers_file discarded_file
+    keepers_file=$(mktemp) || die "Failed to create a temp file"
+    discarded_file=$(mktemp) || die "Failed to create a temp file"
+    if ! list_worktree_keeper_files "$selected_path" "$main_worktree" "$discarded_file" > "$keepers_file"; then
+        die "Could not list all unversioned files of $selected_path (see above); nothing was removed"
+    fi
+    local -a keepers=() discarded=()
+    mapfile -d '' -t keepers < "$keepers_file"
+    mapfile -d '' -t discarded < "$discarded_file"
+    rm -f -- "$keepers_file" "$discarded_file"
+
+    local shown
+    if [[ ${#discarded[@]} -gt 0 ]]; then
+        echo "${#discarded[@]} unversioned entries are deleted with the worktree (build output, IDE state, copies identical to the main repo):"
+        for shown in "${discarded[@]:0:10}"; do
+            echo "  $shown"
+        done
+        [[ ${#discarded[@]} -le 10 ]] || echo "  … and $(( ${#discarded[@]} - 10 )) more"
     fi
 
-    if [[ "$DRY_RUN" == false ]]; then
-        print_green "Worktree removed successfully."
+    local remove_error=""
+    local keep_files=false
+    if [[ ${#keepers[@]} -gt 0 ]]; then
+        echo "${#keepers[@]} unversioned files worth keeping:"
+        for shown in "${keepers[@]:0:10}"; do
+            echo "  $shown"
+        done
+        [[ ${#keepers[@]} -le 10 ]] || echo "  … and $(( ${#keepers[@]} - 10 )) more"
 
-        # Drop the worktree's Claude Code per-directory project entry
-        remove_claude_project_entry "$selected_path"
+        # A Claude session or an editor may still be writing here
+        local newest age
+        newest=$(newest_mtime "$selected_path" "${keepers[@]}")
+        age=$(( $(date +%s) - newest ))
+        if [[ "$newest" -gt 0 ]] && [[ "$age" -lt "$RECENT_WRITE_SECONDS" ]]; then
+            warn "The newest of these files was written ${age} s ago; something (a Claude session?) may still be writing in this worktree."
+            echo -n "Continue removing it? [y/N]: "
+            local recent_answer=""
+            read -r recent_answer || true
+            [[ "$recent_answer" =~ ^[Yy]$ ]] || die "Aborted."
+        fi
+        echo -n "Keep them in place after removing the worktree? [Y/n]: "
+        local keep_answer=""
+        read -r keep_answer || true
+        [[ "$keep_answer" =~ ^[Nn]$ ]] || keep_files=true
+    fi
+
+    # Changes a forced removal would discard, including ones git status does not show
+    local unsaved
+    unsaved=$(worktree_unsaved_state "$selected_path")
+    if [[ -n "$unsaved" ]]; then
+        warn "Worktree has unsaved state that removing it discards:"
+        echo "$unsaved"
+        echo -n "Discard it and remove anyway? [y/N]: "
+        local discard_answer=""
+        read -r discard_answer || true
+        [[ "$discard_answer" =~ ^[Yy]$ ]] || die "Aborted."
+    fi
+
+    if [[ "$keep_files" == true ]]; then
+        # Files that appeared or vanished while the prompts waited would not be kept;
+        # list again right before the copy and stop if the set changed
+        local relisted_file
+        relisted_file=$(mktemp) || die "Failed to create a temp file"
+        if ! list_worktree_keeper_files "$selected_path" "$main_worktree" > "$relisted_file"; then
+            die "Could not list all unversioned files of $selected_path again (see above); nothing was removed"
+        fi
+        if ! cmp -s <(printf '%s\0' "${keepers[@]}" | sort -z) <(sort -z "$relisted_file"); then
+            warn "The unversioned files changed while you were deciding (< gone, > new):"
+            diff <(printf '%s\n' "${keepers[@]}" | sort) <(tr '\0' '\n' < "$relisted_file" | sort) | grep '^[<>]' || true
+            rm -f -- "$relisted_file"
+            die "Nothing was removed; run it again"
+        fi
+        rm -f -- "$relisted_file"
+        remove_worktree_keeping_files "$selected_path" "$main_worktree" "${keepers[@]}"
+        # The directory stays, so its Claude Code project entry stays too
+    else
+        # Remove the worktree, offering --force if it has modifications
+        if [[ "$DRY_RUN" == true ]]; then
+            mutate git worktree remove "$selected_path"
+        else
+            # Re-check right before the removal: the prompts above may have waited a while
+            require_no_mounts "$selected_path" "remove $selected_path"
+            if ! remove_error=$(git worktree remove "$selected_path" 2>&1); then
+                warn "git worktree remove refused: ${remove_error}"
+                echo -n "Force remove? [y/N]: "
+                local confirm=""
+                read -r confirm || true
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    # git worktree remove --force does not stop at mount points
+                    require_no_mounts "$selected_path" "force-remove $selected_path"
+                    git worktree remove --force "$selected_path"
+                else
+                    die "Aborted."
+                fi
+            fi
+        fi
+
+        if [[ "$DRY_RUN" == false ]]; then
+            print_green "Worktree removed successfully."
+
+            # Drop the worktree's Claude Code per-directory project entry
+            remove_claude_project_entry "$selected_path"
+        fi
     fi
 
     # Optionally delete the branch if it exists
@@ -210,12 +458,19 @@ cleanup_orphaned_dirs() {
     # Check each directory in all worktrees dirs
     local -a orphaned=()
     local -a unregistered=()
+    local archived_count=0
     local dir wt_dir dir_resolved
     for wt_dir in "${worktrees_dirs[@]}"; do
     for dir in "$wt_dir"/*/; do
         [[ -d "$dir" ]] || continue
         dir="${dir%/}"  # strip trailing slash
         [[ ! -L "$dir" ]] || continue  # never follow a symlink out of the worktrees dir
+
+        # Removed worktrees whose unversioned files were kept in place
+        if [[ -f "${dir}/${WORKTREE_ARCHIVED_MARKER}" ]]; then
+            archived_count=$((archived_count + 1))
+            continue
+        fi
 
         dir_resolved=$(realpath -e -- "$dir") || continue
         local is_known=false
@@ -241,6 +496,24 @@ cleanup_orphaned_dirs() {
     if [[ ${#unregistered[@]} -gt 0 ]]; then
         warn "${#unregistered[@]} worktree directories have .git but are not registered (try git worktree repair), left alone:"
         for dir in "${unregistered[@]}"; do
+            echo "  $dir" >&2
+        done
+    fi
+
+    if [[ "$archived_count" -gt 0 ]]; then
+        print_dim "${archived_count} archived worktree dirs kept (removed worktrees with their unversioned files, see ${WORKTREE_ARCHIVED_MARKER})"
+    fi
+
+    # Temp dirs of an interrupted keep or restore hold the only copy of some files
+    local -a leftover_temps=()
+    for wt_dir in "${worktrees_dirs[@]}"; do
+        for dir in "$wt_dir"/.worktree-keep.* "$wt_dir"/.worktree-restore.*; do
+            [[ -d "$dir" && ! -L "$dir" ]] && leftover_temps+=("$dir") || true
+        done
+    done
+    if [[ ${#leftover_temps[@]} -gt 0 ]]; then
+        warn "${#leftover_temps[@]} temp dirs left by an interrupted keep or restore, they may hold the only copy of kept files (never deleted automatically):"
+        for dir in "${leftover_temps[@]}"; do
             echo "  $dir" >&2
         done
     fi

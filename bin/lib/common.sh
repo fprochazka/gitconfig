@@ -511,7 +511,8 @@ warmup_worktree() {
     local git_root="$2"
 
     # Build grep pattern for excluding build artifact directories and the worktrees dir itself
-    local exclude_pattern="(^|/)\.worktrees/"
+    # Never copy an archived-worktree marker into a new worktree
+    local exclude_pattern="(^|/)\.worktrees/|(^|/)\.worktree-archived\$"
     local dir
     for dir in "${WARMUP_EXCLUDE_DIRS[@]}"; do
         exclude_pattern="${exclude_pattern}|(^|/)${dir}/"
@@ -579,7 +580,13 @@ warmup_worktree() {
                 continue
             fi
 
-            # Copy the file
+            # Never write through a symlinked directory (e.g. a restored archive's) out of the worktree
+            if ! _dest_stays_inside "$worktree_path" "$file"; then
+                warn "Skipping ${file}: its directory in the worktree resolves outside of it"
+                continue
+            fi
+            # Copy the file, never over one the worktree already has (restored archive)
+            [[ ! -e "${worktree_path}/${file}" && ! -L "${worktree_path}/${file}" ]] || continue
             local target_dir
             target_dir=$(dirname "${worktree_path}/${file}")
             mkdir -p "$target_dir"
@@ -602,6 +609,14 @@ warmup_worktree() {
             fi
         done
         [[ "$skip" == false ]] || continue
+
+        # Never write through a symlinked directory (e.g. a restored archive's) out of the worktree
+        if ! _dest_stays_inside "$worktree_path" "$file"; then
+            warn "Skipping ${file}: its directory in the worktree resolves outside of it"
+            continue
+        fi
+        # Never copy over a file the worktree already has (restored archive)
+        [[ ! -e "${worktree_path}/${file}" && ! -L "${worktree_path}/${file}" ]] || continue
 
         local target_dir
         target_dir=$(dirname "${worktree_path}/${file}")
@@ -1009,9 +1024,233 @@ claude_sessions_for_path() {
     fi
 }
 
+#
+# Keeping unversioned files in place across worktree removal and re-checkout
+#
+# These functions also run inside command substitutions, where bash turns errexit
+# off, so every step that matters is checked explicitly.
+#
+
+# Message printed when the user interrupts a move between a worktree and its temp dir
+_INTERRUPT_NOTE=""
+
+# Print _INTERRUPT_NOTE on Ctrl+C / TERM for the rest of the (sub)shell, until clear_interrupt_note
+# Usage: set_interrupt_note "message"
+set_interrupt_note() {
+    _INTERRUPT_NOTE="$1"
+    trap 'warn "Interrupted. $_INTERRUPT_NOTE"; exit 130' INT TERM
+}
+
+clear_interrupt_note() {
+    _INTERRUPT_NOTE=""
+    trap - INT TERM
+}
+
+# NUL-delimited "./<rel>\t<size>" records of the given files (and symlinks) under
+# a root, sorted. Paths that do not exist are left out, so comparing two
+# manifests catches missing files as well as size differences.
+# Usage: _manifest_of_paths <root> <rel_path>...
+_manifest_of_paths() {
+    local root="$1"
+    shift
+    [[ $# -gt 0 ]] || return 0
+    # shellcheck disable=SC2016 # expanded by the inner bash
+    (cd "$root" && printf './%s\0' "$@" \
+        | xargs -0 -r bash -c 'find "$@" -maxdepth 0 \( -type f -o -type l \) -printf "%p\t%s\0" 2>/dev/null || true' _) \
+        | sort -z
+}
+
+# NUL-delimited "./<rel>\t<size>" records of every file and symlink under a root, sorted
+# Usage: _manifest_of_tree <root>
+_manifest_of_tree() {
+    (cd "$1" && find . -mindepth 1 \( -type f -o -type l \) -printf '%p\t%s\0') | sort -z
+}
+
+# True when <dst>/<rel> would be created inside <dst>: the deepest existing
+# ancestor of its parent directory resolves inside <dst>, so no symlinked
+# directory (e.g. one warmup copied from the main repo) leads the move elsewhere
+# Usage: _dest_stays_inside <dst> <rel>
+_dest_stays_inside() {
+    local dst="$1" rel="$2" root ancestor resolved
+    root=$(realpath -e -- "$dst") || return 1
+    ancestor=$(dirname -- "${dst}/${rel}")
+    while [[ ! -e "$ancestor" && ! -L "$ancestor" ]]; do
+        ancestor=$(dirname -- "$ancestor")
+    done
+    resolved=$(realpath -e -- "$ancestor") || return 1
+    [[ "$resolved" == "$root" || "$resolved" == "${root}/"* ]]
+}
+
+# Move every file and symlink from <src> into the same relative path under <dst>,
+# never overwriting and never through a symlinked directory: an existing target,
+# a destination resolving outside <dst>, or a move that leaves the source in place
+# stops with an error. <skip_rel> is left in <src>. Directories stay behind, empty.
+# Usage: _move_tree_into <src> <dst> [skip_rel]
+_move_tree_into() {
+    local src="$1" dst="$2" skip="${3:-}"
+    local list rel rc=0
+    list=$(mktemp) || return 1
+    if ! (cd -- "$src" && find . -mindepth 1 \( -type f -o -type l \) -printf '%P\0') > "$list"; then
+        warn "Cannot list everything in $src"
+        rm -f -- "$list"
+        return 1
+    fi
+    while IFS= read -r -d '' rel; do
+        [[ "$rel" != "$skip" ]] || continue
+        if ! _dest_stays_inside "$dst" "$rel"; then
+            warn "Refusing to move ${rel}: its directory in $dst resolves outside of it"
+            rc=1; break
+        fi
+        if ! mkdir -p -- "$(dirname -- "${dst}/${rel}")"; then
+            rc=1; break
+        fi
+        if [[ -e "${dst}/${rel}" || -L "${dst}/${rel}" ]]; then
+            warn "Refusing to overwrite ${dst}/${rel}"
+            rc=1; break
+        fi
+        if ! mv -n -- "${src}/${rel}" "${dst}/${rel}" || [[ -e "${src}/${rel}" || -L "${src}/${rel}" ]] || [[ ! -e "${dst}/${rel}" && ! -L "${dst}/${rel}" ]]; then
+            warn "Failed to move ${src}/${rel}"
+            rc=1; break
+        fi
+    done < "$list"
+    rm -f -- "$list"
+    return "$rc"
+}
+
+# True when a directory tree holds no files, symlinks or other non-directories
+# Usage: _tree_has_no_files <dir>
+_tree_has_no_files() {
+    local found
+    found=$(find "$1" -mindepth 1 ! -type d -print -quit) || return 1
+    [[ -z "$found" ]]
+}
+
+# Remove a directory tree that holds only empty directories, bottom-up with
+# rmdir, which refuses any directory that still has content
+# Usage: _rmdir_empty_tree <dir>
+_rmdir_empty_tree() {
+    local dir
+    while IFS= read -r -d '' dir; do
+        rmdir -- "$dir" || return 1
+    done < <(find "$1" -depth -type d -print0)
+    [[ ! -e "$1" ]]
+}
+
+# Move an archived worktree directory's content into a new temp dir next to it
+# and remove the then-empty directory, so `git worktree add` can use the path.
+# The marker moves last, so an interrupted stash leaves the dir protected from
+# orphan cleanup. Prints the temp dir path.
+# Usage: stash_archived_worktree_dir <dir>
+stash_archived_worktree_dir() {
+    local dir="$1"
+    local tmp before
+    tmp=$(mktemp -d "$(dirname "$dir")/.worktree-restore.XXXXXX") || die "Failed to create a temp dir next to $dir"
+    before=$(mktemp) || die "Failed to create a temp file"
+    _manifest_of_tree "$dir" > "$before" || die "Cannot list the archived files in $dir; nothing was moved"
+
+    _move_tree_into "$dir" "$tmp" "$WORKTREE_ARCHIVED_MARKER" \
+        || die "Moving the archived files aside failed; the moved ones are in $tmp, the rest are still in $dir"
+    if ! mv -n -- "${dir}/${WORKTREE_ARCHIVED_MARKER}" "${tmp}/${WORKTREE_ARCHIVED_MARKER}" || [[ -e "${dir}/${WORKTREE_ARCHIVED_MARKER}" ]]; then
+        die "Moving ${WORKTREE_ARCHIVED_MARKER} aside failed; the archived files are in $tmp"
+    fi
+    cmp -s "$before" <(_manifest_of_tree "$tmp") || die "The archived files moved aside do not match the originals; they are in $tmp"
+    rm -f -- "$before"
+    _rmdir_empty_tree "$dir" || die "$dir is not empty after moving its files aside; moved files are in $tmp"
+
+    echo "$tmp"
+}
+
+# Undo stash_archived_worktree_dir: recreate <dir> (it must be missing or empty),
+# move the marker back first, then the files, and verify. Returns non-zero, with
+# the files left in <tmp>, when any step fails.
+# Usage: unstash_archived_worktree_dir <tmp> <dir>
+unstash_archived_worktree_dir() {
+    local tmp="$1" dir="$2" before
+    if [[ -e "$dir" || -L "$dir" ]]; then
+        [[ -d "$dir" && ! -L "$dir" && -z "$(ls -A -- "$dir")" ]] || return 1
+    else
+        mkdir -p -- "$dir" || return 1
+    fi
+    before=$(mktemp) || return 1
+    _manifest_of_tree "$tmp" > "$before" || return 1
+    if ! mv -n -- "${tmp}/${WORKTREE_ARCHIVED_MARKER}" "${dir}/${WORKTREE_ARCHIVED_MARKER}" || [[ -e "${tmp}/${WORKTREE_ARCHIVED_MARKER}" ]]; then
+        return 1
+    fi
+    _move_tree_into "$tmp" "$dir" || return 1
+    cmp -s "$before" <(_manifest_of_tree "$dir") || return 1
+    rm -f -- "$before"
+    _tree_has_no_files "$tmp" || return 1
+    _rmdir_empty_tree "$tmp"
+}
+
+# Move archived files from <tmp> back into a freshly checked-out worktree, before
+# warmup runs. A file git checked out at the same path is never overwritten: an
+# identical archived copy is deleted, a different one is kept next to it as
+# <name>.archived. Every moved file is verified at its destination
+# (path and size), and the temp dir is deleted only when it holds no file at all
+# any more; on any mismatch the temp dir stays and the script stops.
+# Usage: restore_archived_worktree_files <tmp> <worktree_path> <git_root>
+restore_archived_worktree_files() {
+    local tmp="$1" worktree_path="$2" git_root="$3"
+    local expected list
+    expected=$(mktemp) || die "Failed to create a temp file; archived files are in $tmp"
+    list=$(mktemp) || die "Failed to create a temp file; archived files are in $tmp"
+    (cd -- "$tmp" && find . -mindepth 1 \( -type f -o -type l \) -printf '%P\0') > "$list" \
+        || die "Cannot list the archived files in $tmp; nothing was restored"
+
+    local -a dest_rels=()
+    local -a conflicts=()
+    local dropped=0
+    local rel dest size
+    while IFS= read -r -d '' rel; do
+        [[ "$rel" != "$WORKTREE_ARCHIVED_MARKER" ]] || continue
+        size=$(stat -c '%s' -- "${tmp}/${rel}") || die "Failed to read ${tmp}/${rel}; archived files are in $tmp"
+        dest="$rel"
+
+        if [[ -e "${worktree_path}/${rel}" || -L "${worktree_path}/${rel}" ]]; then
+            if [[ ! -L "${tmp}/${rel}" && ! -L "${worktree_path}/${rel}" ]] && cmp -s -- "${tmp}/${rel}" "${worktree_path}/${rel}"; then
+                # Identical to the checked-out file: the archived copy carries nothing more
+                rm -f -- "${tmp}/${rel}" || die "Failed to drop ${tmp}/${rel}; archived files are in $tmp"
+                dropped=$((dropped + 1))
+                continue
+            fi
+            dest="${rel}.archived"
+            conflicts+=("$rel")
+            if [[ -e "${worktree_path}/${dest}" || -L "${worktree_path}/${dest}" ]]; then
+                die "Both ${worktree_path}/${rel} and ${dest} exist; archived files are in $tmp"
+            fi
+        fi
+
+        _dest_stays_inside "$worktree_path" "$dest" \
+            || die "The directory of $dest resolves outside of $worktree_path; archived files are in $tmp"
+        mkdir -p -- "$(dirname -- "${worktree_path}/${dest}")" || die "mkdir failed; archived files are in $tmp"
+        if ! mv -n -- "${tmp}/${rel}" "${worktree_path}/${dest}" || [[ -e "${tmp}/${rel}" || -L "${tmp}/${rel}" ]]; then
+            die "Moving $rel back failed; archived files are in $tmp"
+        fi
+        dest_rels+=("$dest")
+        printf './%s\t%s\0' "$dest" "$size" >> "$expected"
+    done < "$list"
+
+    if ! cmp -s <(sort -z "$expected") <(_manifest_of_paths "$worktree_path" "${dest_rels[@]}"); then
+        die "Restored files do not match the archived copies; the remaining archived files are in $tmp"
+    fi
+    rm -f -- "${tmp}/${WORKTREE_ARCHIVED_MARKER}" || die "Failed to drop the marker in $tmp"
+    _tree_has_no_files "$tmp" || die "Files were left behind in $tmp after restoring; check it before deleting"
+    rm -f -- "$expected" "$list"
+
+    safe_rm_rf "$tmp" "$(dirname "$tmp")" "$git_root" "$worktree_path"
+
+    print_green "Restored ${#dest_rels[@]} archived unversioned files (${dropped} identical to the checkout were dropped)" >&2
+    local conflict
+    for conflict in "${conflicts[@]}"; do
+        warn "Kept the checked-out ${conflict}; the archived version is ${conflict}.archived"
+    done
+}
+
 # Create a worktree for a branch
 # Usage: create_worktree "branch-name" [git_root_dir]
-# Creates worktree at <project>/.worktrees/<sanitized-branch-name>
+# Creates worktree at <project>/.worktrees/<sanitized-branch-name>, or reuses an
+# archived worktree dir at that path (or the legacy one) and restores its files
 create_worktree() {
     local branch_name="$1"
     local git_root="${2:-$(get_main_repo_root)}"
@@ -1029,15 +1268,67 @@ create_worktree() {
         print_green "Created worktrees directory: $worktrees_dir" >&2
     fi
 
-    # Check if worktree already exists
-    if [[ -d "$worktree_path" ]]; then
+    # A worktree removed with its unversioned files kept is re-checked out at its
+    # original path (Claude sessions are keyed by it), legacy location included
+    local legacy_path
+    legacy_path="$(get_legacy_worktrees_dir "$git_root")/${dirname}"
+    if [[ -f "${legacy_path}/${WORKTREE_ARCHIVED_MARKER}" ]] && [[ ! -L "$legacy_path" ]]; then
+        worktree_path="$legacy_path"
+    fi
+
+    # An interrupted keep or restore leaves kept files in a hidden temp dir next to
+    # the worktree, possibly with no marker left at the worktree path; say so, but
+    # never restore from it automatically (it does not record whose files it holds)
+    local leftover leftovers_dir
+    for leftovers_dir in "$worktrees_dir" "$(get_legacy_worktrees_dir "$git_root")"; do
+        for leftover in "$leftovers_dir"/.worktree-keep.* "$leftovers_dir"/.worktree-restore.*; do
+            [[ -d "$leftover" && ! -L "$leftover" ]] || continue
+            warn "Leftover temp dir from an interrupted git wt-cleanup or git wt, it may hold kept files of this or another worktree (not restored automatically): $leftover"
+        done
+    done
+
+    local archived_tmp=""
+    if [[ -f "${worktree_path}/${WORKTREE_ARCHIVED_MARKER}" ]] && [[ ! -L "$worktree_path" ]]; then
+        # A live worktree with a stray marker must never be dismantled
+        if [[ -e "${worktree_path}/.git" || -L "${worktree_path}/.git" ]]; then
+            die "$worktree_path is a git worktree but has ${WORKTREE_ARCHIVED_MARKER}; delete the marker by hand if it is stale"
+        fi
+        # Different branches can sanitize to the same dir name
+        local archived_branch
+        archived_branch=$(awk 'sub(/^branch: /, "") { print; exit }' "${worktree_path}/${WORKTREE_ARCHIVED_MARKER}")
+        if [[ "$archived_branch" != "$branch_name" ]]; then
+            die "$worktree_path holds the kept files of branch '${archived_branch}', not '${branch_name}'; move it away first, or edit the branch: line of its ${WORKTREE_ARCHIVED_MARKER} if it belongs to '${branch_name}'"
+        fi
+
+        print_yellow "Re-checking out into an archived worktree dir, its kept files will be restored:" >&2
+        sed 's/^/  /' "${worktree_path}/${WORKTREE_ARCHIVED_MARKER}" >&2
+        set_interrupt_note "The archived files of $worktree_path may be in $(dirname "$worktree_path")/.worktree-restore.*"
+        archived_tmp=$(stash_archived_worktree_dir "$worktree_path") || die "Moving the archived files aside failed (see above)"
+        set_interrupt_note "The archived files of $worktree_path are in $archived_tmp"
+    elif [[ -e "$worktree_path" || -L "$worktree_path" ]]; then
         die "Worktree already exists: $worktree_path"
     fi
 
     # Create the worktree (redirect output to stderr so it doesn't mix with return value)
-    git worktree add "$worktree_path" "$branch_name" >&2
+    if ! git worktree add "$worktree_path" "$branch_name" >&2; then
+        if [[ -n "$archived_tmp" ]]; then
+            if unstash_archived_worktree_dir "$archived_tmp" "$worktree_path"; then
+                die "git worktree add failed; the archived dir $worktree_path is back as it was"
+            fi
+            die "git worktree add failed, and putting the archived files back failed too; they are in $archived_tmp"
+        fi
+        die "git worktree add failed"
+    fi
 
-    # Warm up the worktree with gitignored files from main repo
+    # Bring back the archived files before warmup: the worktree's own copy of a
+    # gitignored file (e.g. .claude/settings.local.json) wins over the main repo's,
+    # and only a file git checked out makes the archived one a .archived
+    if [[ -n "$archived_tmp" ]]; then
+        restore_archived_worktree_files "$archived_tmp" "$worktree_path" "$git_root"
+        clear_interrupt_note
+    fi
+
+    # Warm up the worktree with gitignored files from main repo (never overwrites)
     warmup_worktree "$worktree_path" "$git_root"
 
     # Propagate mise trust if the source repo's config is trusted
