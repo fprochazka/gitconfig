@@ -181,6 +181,17 @@ get_worktree_branch_info() {
         fi
     fi
 
+    # The push destination (push.default=current) when it is another existing ref and
+    # the branch is ahead of it: that is what the removal checks
+    local push_ref push_ahead
+    if push_ref=$(git for-each-ref --format='%(push)' "refs/heads/${branch}" 2>/dev/null) \
+        && [[ "$push_ref" == refs/remotes/* && "${push_ref#refs/remotes/}" != "${upstream:-}" ]] \
+        && git show-ref --verify --quiet "$push_ref" \
+        && push_ahead=$(git rev-list --count "${push_ref}..refs/heads/${branch}" 2>/dev/null) \
+        && [[ "$push_ahead" -gt 0 ]]; then
+        upstream_info="${upstream_info:+${upstream_info} }${COLOR_YELLOW}[push ${push_ref#refs/remotes/}: ahead ${push_ahead}]${COLOR_RESET}"
+    fi
+
     echo -e "${COLOR_GREEN}${branch}${COLOR_RESET} ${commit_hash} ${upstream_info} ${commit_msg}"
 }
 
@@ -858,15 +869,15 @@ show_branch_mr_status() {
 #             ancestor of it, so the branch has no commit the MR did not carry
 #   open-mr - an MR/PR of the branch is still open (or locked): work may continue there, so the
 #             branch never counts as merged, whatever else holds
-#   ahead-of-upstream - the branch has commits that its still existing remote-
-#             tracking upstream, or its push destination (push.default=current and
-#             remote.pushDefault give one without an upstream), lacks: unpushed work,
-#             whatever else holds. BRANCH_VERDICT_REF is the ref, BRANCH_AHEAD_TEXT
+#   ahead-of-upstream - the branch has commits its remote copy lacks: its push
+#             destination when that remote-tracking ref exists (push.default=current
+#             and remote.pushDefault give one even without an upstream), otherwise
+#             its still existing upstream. Unpushed work, whatever else holds. BRANCH_VERDICT_REF is the ref, BRANCH_AHEAD_TEXT
 #             the phrase for messages (with the count, or saying it failed). A gone ref (deleted after the merge) does not count
 #   unknown - the MR lookup failed and git history does not show the branch merged
 #   no      - none of the above (including a detached HEAD)
 # BRANCH_VERDICT_REF names the MR/PR behind "mr" or "open-mr", and the remote-tracking
-# ref behind "ahead-of-upstream".
+# ref behind "ahead-of-upstream" (empty when the lookup itself failed).
 # Usage: branch_merge_verdict <branch> <main_branch>
 BRANCH_VERDICT=""
 BRANCH_VERDICT_REF=""
@@ -878,40 +889,45 @@ branch_merge_verdict() {
     BRANCH_AHEAD_TEXT=""
     [[ "$branch" != "detached" ]] || return 0
 
-    # Commits that the branch's existing upstream or push destination lacks are
-    # unpushed work, even when the branch is an ancestor of main or covered by a
-    # merged MR. Both refs of exactly refs/heads/<branch> come from for-each-ref
+    # Commits that the branch's remote copy lacks are unpushed work, even when the
+    # branch is an ancestor of main or covered by a merged MR. The remote copy is
+    # the push destination when it exists (push.default=current gives origin/<b>
+    # also for a branch whose upstream is origin/master), otherwise the upstream;
+    # a never-pushed branch with local commits on top of its upstream is refused that
+    # way. Both refs of exactly refs/heads/<branch> come from for-each-ref
     # (<ref>@{upstream} is rejected for a full ref name, and a bare name could hit a
-    # tag); empty means none. A failed lookup refuses rather than passing as "none".
+    # tag); empty means none. A failed lookup or count refuses.
     local tracking=""
     # ":" cannot occur in a ref name, so it separates the two safely
     if ! tracking=$(git for-each-ref --format='%(upstream):%(push)' "refs/heads/${branch}"); then
         BRANCH_VERDICT="ahead-of-upstream"
-        BRANCH_VERDICT_REF="its upstream"
-        BRANCH_AHEAD_TEXT="may have commits its upstream or push destination lacks (the lookup failed)"
+        BRANCH_AHEAD_TEXT="cannot be compared with its upstream or push destination (the lookup failed)"
         return 0
     fi
-    local -a tracking_refs=("${tracking%%:*}" "${tracking#*:}")
-    local tracking_ref kind="upstream" ahead
-    for tracking_ref in "${tracking_refs[@]}"; do
-        if [[ "$tracking_ref" == refs/remotes/* ]] && git show-ref --verify --quiet "$tracking_ref"; then
-            ahead=""
-            if ! ahead=$(git rev-list --count "${tracking_ref}..refs/heads/${branch}"); then
-                ahead="?"
-            fi
-            if [[ "$ahead" != 0 ]]; then
-                BRANCH_VERDICT="ahead-of-upstream"
-                BRANCH_VERDICT_REF="${tracking_ref#refs/remotes/}"
-                if [[ "$ahead" == "?" ]]; then
-                    BRANCH_AHEAD_TEXT="has commits its ${kind} ${BRANCH_VERDICT_REF} lacks (the count failed)"
-                else
-                    BRANCH_AHEAD_TEXT="is ${ahead} commits ahead of its ${kind} ${BRANCH_VERDICT_REF}"
-                fi
-                return 0
-            fi
-        fi
+    local upstream_ref="${tracking%%:*}" push_ref="${tracking#*:}" compare_ref="" kind=""
+    if [[ "$push_ref" == refs/remotes/* ]] && git show-ref --verify --quiet "$push_ref"; then
+        compare_ref="$push_ref"
         kind="push destination"
-    done
+    elif [[ "$upstream_ref" == refs/remotes/* ]] && git show-ref --verify --quiet "$upstream_ref"; then
+        compare_ref="$upstream_ref"
+        kind="upstream"
+    fi
+    if [[ -n "$compare_ref" ]]; then
+        local ahead=""
+        if ! ahead=$(git rev-list --count "${compare_ref}..refs/heads/${branch}"); then
+            ahead="?"
+        fi
+        if [[ "$ahead" != 0 ]]; then
+            BRANCH_VERDICT="ahead-of-upstream"
+            BRANCH_VERDICT_REF="${compare_ref#refs/remotes/}"
+            if [[ "$ahead" == "?" ]]; then
+                BRANCH_AHEAD_TEXT="has commits its ${kind} ${BRANCH_VERDICT_REF} may lack (the count failed)"
+            else
+                BRANCH_AHEAD_TEXT="is ${ahead} commits ahead of its ${kind} ${BRANCH_VERDICT_REF}"
+            fi
+            return 0
+        fi
+    fi
 
     lookup_branch_mrs "$branch"
     local state ref target sha merged_date
@@ -967,7 +983,7 @@ require_merged_or_force() {
                 warn "Branch '${branch}' ${BRANCH_AHEAD_TEXT}. --force: cleaning up the worktree anyway; the branch is kept."
                 return 0
             fi
-            die "Branch '${branch}' ${BRANCH_AHEAD_TEXT}; push it or delete that remote branch first. Nothing was removed. Run again with --force to remove the worktree anyway (the branch is kept; every other safety check still applies)."
+            die "Branch '${branch}' ${BRANCH_AHEAD_TEXT}; push it (or delete the stale remote branch) first. Nothing was removed. Run again with --force to remove the worktree anyway (the branch is kept; every other safety check still applies)."
             ;;
         unknown) why="git history does not show it merged into ${main_branch} and its MR state is unknown (the lookup failed)" ;;
         *)
@@ -1288,7 +1304,7 @@ remove_worktree() {
         else
             # Ask for unmerged branches; --force never deletes one
             [[ "$BRANCH_VERDICT" != open-mr ]] || warn "Branch '$selected_branch' still has open ${BRANCH_VERDICT_REF}"
-            [[ "$BRANCH_VERDICT" != ahead-of-upstream ]] || warn "Branch '$selected_branch' ${BRANCH_AHEAD_TEXT} (unpushed work)"
+            [[ "$BRANCH_VERDICT" != ahead-of-upstream ]] || warn "Branch '$selected_branch' ${BRANCH_AHEAD_TEXT}"
             local kept_what="unmerged branch"
             [[ "$BRANCH_VERDICT" != ahead-of-upstream ]] || kept_what="unpushed branch"
             if [[ "$FORCE_UNMERGED" == true ]]; then
