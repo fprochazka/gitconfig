@@ -41,6 +41,10 @@ declare -rA YES_ANSWERS=(
     [remove-orphans]=n          # orphaned directories are never deleted
 )
 
+# --force: clean up the current worktree although its branch is not merged (the
+# branch is then kept). Overrides nothing else: every other safety stop still stops.
+FORCE_UNMERGED=false
+
 # Every prompt goes through ask, so --yes-safe cannot auto-answer a question it does
 # not know. Sets ASK_ANSWER. End of input never counts as an answer: it stops
 # the run instead of falling back to the prompt's default.
@@ -63,7 +67,7 @@ ask() {
 
 show_help() {
     cat << 'EOF'
-Usage: git worktree-cleanup [-i|--interactive] [-l|--list] [-n|--dry-run] [--yes-safe] [--no-signals]
+Usage: git worktree-cleanup [-i|--interactive] [-l|--list] [-n|--dry-run] [--yes-safe] [--force] [--no-signals]
 
 Interactively remove git worktrees.
 
@@ -74,6 +78,11 @@ of all worktrees with branch information including:
   - Commit hash
   - Upstream tracking status (ahead/behind)
   - Last commit message
+
+Run from inside a linked worktree, it cleans up that worktree, and only when its
+branch is merged into the main branch: by git history, or by a merged MR/PR into
+the main branch whose head contains the branch tip, with no MR/PR of the branch
+still open. Otherwise it stops before touching anything, unless --force.
 
 Removing a worktree shows every MR/PR of its branch (GitLab or GitHub). A
 branch that git history does not show merged is still deleted when one of its
@@ -99,7 +108,13 @@ Options:
                         branch, skip orphaned directories. Every safety question
                         (unsaved changes, recently written files, git refusing a
                         plain removal, ...) stops the run instead. Only inside a
-                        linked worktree; combines with --dry-run only
+                        linked worktree; combines with --dry-run and --force
+    --force             Clean up the current worktree although its branch is not
+                        merged (see below); the branch is kept. Overrides only
+                        that refusal: unsaved changes, recently written files,
+                        mounts, changed files and git refusing a plain removal
+                        still stop the run, nothing is ever force-removed by it.
+                        With --yes-safe: no questions; alone: the usual questions
     --no-signals        Skip the keep/sessions scan (faster on hundreds of worktrees)
 
 Examples:
@@ -466,6 +481,34 @@ branch_merge_verdict() {
     done <<< "${MR_LINES[$branch]}"
 }
 
+# Cleaning up the worktree you are in is only for merged work: die, before anything
+# is touched, unless the branch is merged by git history or through a merged MR/PR
+# (see branch_merge_verdict) or --force was given
+# Usage: require_merged_or_force <branch>
+require_merged_or_force() {
+    local branch="$1" main_branch why
+    main_branch=$(get_main_branch)
+    branch_merge_verdict "$branch" "$main_branch"
+    case "$BRANCH_VERDICT" in
+        git|mr) return 0 ;;
+        open-mr) why="it still has open ${BRANCH_VERDICT_REF}, so work may continue on it" ;;
+        unknown) why="git history does not show it merged into ${main_branch} and its MR state is unknown (the lookup failed)" ;;
+        *)
+            if [[ "$branch" == "detached" ]]; then
+                why="the worktree has a detached HEAD"
+            else
+                why="it is merged into ${main_branch} neither by git history nor by a merged MR/PR whose head contains the branch tip"
+            fi
+            ;;
+    esac
+
+    if [[ "$FORCE_UNMERGED" == true ]]; then
+        warn "Branch '${branch}' is not merged: ${why}. --force: cleaning up the worktree anyway; the branch is kept."
+        return 0
+    fi
+    die "Branch '${branch}' is not merged: ${why}. Nothing was removed. Run again with --force to remove the worktree anyway (the branch is kept; every other safety check still applies)."
+}
+
 # Remove a worktree and optionally its branch. When the worktree has keeper
 # files, offers to keep them in place (see remove_worktree_keeping_files).
 # Usage: remove_worktree <path> <branch>
@@ -693,8 +736,12 @@ remove_worktree() {
             mutate git branch -D "$selected_branch"
             [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted (${BRANCH_VERDICT_REF} into $main_branch is merged and the branch has no commit beyond it)."
         else
-            # Ask for unmerged branches
+            # Ask for unmerged branches; --force never deletes one
             [[ "$BRANCH_VERDICT" != open-mr ]] || warn "Branch '$selected_branch' still has open ${BRANCH_VERDICT_REF}"
+            if [[ "$FORCE_UNMERGED" == true ]]; then
+                echo "Kept unmerged branch '$selected_branch' (--force); delete it with: git branch -D $(printf '%q' "$selected_branch")"
+                return 0
+            fi
             echo ""
             ask delete-unmerged-branch "Also delete unmerged branch '$selected_branch'? [y/N]: " "the worktree was already removed"
             if [[ "$ASK_ANSWER" =~ ^[Yy]$ ]]; then
@@ -900,6 +947,10 @@ main() {
                 ASSUME_YES=true
                 shift
                 ;;
+            --force)
+                FORCE_UNMERGED=true
+                shift
+                ;;
             *)
                 die "Unknown option: $1"
                 ;;
@@ -911,12 +962,46 @@ main() {
     local main_worktree
     main_worktree=$(get_main_repo_root)
 
+    local current_worktree
+    current_worktree=$(git rev-parse --show-toplevel)
+
+    # Run from inside a linked worktree (and not -i/-l): clean up that worktree
+    local current_mode=false
+    if [[ "$current_worktree" != "$main_worktree" ]] && [[ "$force_interactive" == false ]] && [[ "$list_only" == false ]]; then
+        current_mode=true
+    fi
+
     # --yes-safe only ever cleans up the worktree it runs in, never a selection: list
     # numbers shift when worktrees are created between runs
     if [[ "$ASSUME_YES" == true ]]; then
         [[ "$force_interactive" == false ]] || die "--yes-safe cannot be combined with -i; it only cleans up the current worktree"
         [[ "$list_only" == false ]] || die "--yes-safe cannot be combined with --list"
-        [[ "$(git rev-parse --show-toplevel)" != "$main_worktree" ]] || die "--yes-safe only works inside a linked worktree, this is the main repository"
+        [[ "$current_worktree" != "$main_worktree" ]] || die "--yes-safe only works inside a linked worktree, this is the main repository"
+    fi
+    if [[ "$FORCE_UNMERGED" == true ]] && [[ "$current_mode" == false ]]; then
+        die "--force only applies when cleaning up the current worktree from inside it"
+    fi
+
+    # The current worktree's branch must be merged before anything is touched
+    local current_branch=""
+    if [[ "$current_mode" == true ]]; then
+        # The plain branch name from refs/heads (also mid-rebase or mid-bisect), or
+        # "detached"; never heads/<name> (tag of the same name) or "detached HEAD"
+        current_branch=$(worktree_branch_name "$current_worktree")
+
+        echo ""
+        local info
+        if [[ "$current_branch" != "detached" ]]; then
+            info=$(get_worktree_branch_info "$current_branch")
+        else
+            info="${COLOR_YELLOW}(detached HEAD)${COLOR_RESET}"
+        fi
+
+        echo -e "Current worktree: $info"
+        echo -e "  ${COLOR_BOLD}${current_worktree}${COLOR_RESET}"
+        show_branch_mr_status "$current_branch"
+        require_merged_or_force "$current_branch"
+        echo ""
     fi
 
     # --list is strictly read-only: no pruning, no orphan cleanup, no prompts
@@ -932,29 +1017,8 @@ main() {
         cleanup_orphaned_dirs "$main_worktree"
     fi
 
-    local current_worktree
-    current_worktree=$(git rev-parse --show-toplevel)
-
-    # If we're in a worktree (not main repo) and not forcing interactive mode,
-    # offer to clean up the current worktree directly
-    if [[ "$current_worktree" != "$main_worktree" ]] && [[ "$force_interactive" == false ]] && [[ "$list_only" == false ]]; then
-        local current_branch
-        current_branch=$(get_current_branch)
-
-        echo ""
-        local info
-        if [[ "$current_branch" != "HEAD" ]]; then
-            info=$(get_worktree_branch_info "$current_branch")
-        else
-            info="${COLOR_YELLOW}(detached HEAD)${COLOR_RESET}"
-            current_branch="detached"
-        fi
-
-        echo -e "Current worktree: $info"
-        echo -e "  ${COLOR_BOLD}${current_worktree}${COLOR_RESET}"
-        show_branch_mr_status "$current_branch"
-        echo ""
-        ask remove-current "Remove this worktree? [Y/n]: " "nothing was removed"
+    if [[ "$current_mode" == true ]]; then
+        ask remove-current "Remove this worktree? [Y/n]: " "this worktree was not removed"
 
         if [[ ! "$ASK_ANSWER" =~ ^[Nn]$ ]]; then
             echo ""
