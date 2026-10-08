@@ -12,6 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/vcs-hosting.sh"
 
 # Run as a git alias from inside a worktree, git exports GIT_DIR pointing at that
 # worktree's admin dir (.git/worktrees/<id>). It would override repository
@@ -73,6 +74,12 @@ of all worktrees with branch information including:
   - Commit hash
   - Upstream tracking status (ahead/behind)
   - Last commit message
+
+Removing a worktree shows every MR/PR of its branch (GitLab or GitHub). A
+branch that git history does not show merged is still deleted when one of its
+MRs/PRs into the main branch is merged and the branch has no commit beyond that
+MR's head (squash and rebase merges). A branch with an open MR/PR is never
+deleted without asking.
 
 Each worktree also shows whether it may still be needed:
   - keep: unversioned files worth keeping (untracked or ignored files that are
@@ -350,6 +357,115 @@ untracked_is_only_obstacle() {
     [[ "$locked" == false ]]
 }
 
+# MR/PR lookups per branch, made at most once per run (see vcs_branch_mrs)
+declare -A MR_LINES=()     # branch -> TSV lines from vcs_branch_mrs
+declare -A MR_LOOKED_UP=() # branch -> ok | failed
+declare -A MR_SHOWN=()     # branch -> 1 once its status was printed
+
+# Look up the MRs/PRs of a branch once per run; MR_LOOKED_UP says whether it worked
+# Usage: lookup_branch_mrs <branch>
+lookup_branch_mrs() {
+    local branch="$1" lines
+    [[ -z "${MR_LOOKED_UP[$branch]:-}" ]] || return 0
+    if lines=$(vcs_branch_mrs "$branch"); then
+        MR_LINES[$branch]="$lines"
+        MR_LOOKED_UP[$branch]=ok
+    else
+        MR_LINES[$branch]=""
+        MR_LOOKED_UP[$branch]=failed
+    fi
+}
+
+# Print every MR/PR of a branch, one line each, an open one in warning colour.
+# A failed lookup is said out loud. Prints once per branch and run.
+# Usage: show_branch_mr_status <branch>
+show_branch_mr_status() {
+    local branch="$1"
+    [[ "$branch" != "detached" ]] || return 0
+    ! is_main_branch "$branch" || return 0
+    lookup_branch_mrs "$branch"
+
+    [[ -z "${MR_SHOWN[$branch]:-}" ]] || return 0
+    MR_SHOWN[$branch]=1
+
+    if [[ "${MR_LOOKED_UP[$branch]}" == failed ]]; then
+        warn "MR state of '${branch}' unknown: the lookup failed (no glab/gh, offline, timed out or an unexpected response)"
+        return 0
+    fi
+    if [[ -z "${MR_LINES[$branch]}" ]]; then
+        print_dim "No MR/PR for branch '${branch}'"
+        return 0
+    fi
+
+    local state ref target sha merged_date
+    while IFS=$'\t' read -r state ref target sha merged_date; do
+        case "$state" in
+            open)   echo -e "${COLOR_BOLD}${COLOR_YELLOW}${ref} → ${target}: open${COLOR_RESET}" ;;
+            merged) print_green "${ref} → ${target}: merged ${merged_date}" ;;
+            locked) print_dim "${ref} → ${target}: locked (a merge may be in progress)" ;;
+            *)      print_dim "${ref} → ${target}: closed without merging" ;;
+        esac
+    done <<< "${MR_LINES[$branch]}"
+}
+
+# Decide whether a branch's work is merged, and how. Sets BRANCH_VERDICT to:
+#   git     - the branch is an ancestor of the main branch (git branch -d works)
+#   mr      - merged through an MR/PR although git history does not show it (squash
+#             or rebase merge): an MR/PR of the branch has state merged AND targets
+#             the main branch AND the local branch tip is that MR's head commit or an
+#             ancestor of it, so the branch has no commit the MR did not carry
+#   open-mr - an MR/PR of the branch is still open (or locked): work may continue there, so the
+#             branch never counts as merged, whatever else holds
+#   unknown - the MR lookup failed and git history does not show the branch merged
+#   no      - none of the above (including a detached HEAD)
+# BRANCH_VERDICT_REF names the MR/PR behind "mr" or "open-mr".
+# Usage: branch_merge_verdict <branch> <main_branch>
+BRANCH_VERDICT=""
+BRANCH_VERDICT_REF=""
+branch_merge_verdict() {
+    local branch="$1" main_branch="$2"
+    BRANCH_VERDICT=no
+    BRANCH_VERDICT_REF=""
+    [[ "$branch" != "detached" ]] || return 0
+
+    lookup_branch_mrs "$branch"
+    local state ref target sha merged_date
+    if [[ "${MR_LOOKED_UP[$branch]}" == ok ]]; then
+        while IFS=$'\t' read -r state ref target sha merged_date; do
+            # locked: GitLab is merging it right now, not merged yet
+            if [[ "$state" == open || "$state" == locked ]]; then
+                BRANCH_VERDICT=open-mr
+                BRANCH_VERDICT_REF="$ref"
+                return 0
+            fi
+        done <<< "${MR_LINES[$branch]}"
+    fi
+
+    # Full refs on both sides: a tag named like the branch must not decide
+    if git merge-base --is-ancestor "refs/heads/${branch}" "refs/heads/${main_branch}" 2>/dev/null; then
+        BRANCH_VERDICT=git
+        return 0
+    fi
+
+    if [[ "${MR_LOOKED_UP[$branch]}" != ok ]]; then
+        BRANCH_VERDICT=unknown
+        return 0
+    fi
+
+    local tip
+    tip=$(git rev-parse --verify --quiet "refs/heads/${branch}^{commit}") || return 0
+    while IFS=$'\t' read -r state ref target sha merged_date; do
+        [[ "$state" == merged && "$target" == "$main_branch" ]] || continue
+        [[ "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || continue
+        if [[ "$tip" == "$sha" ]] \
+            || { git cat-file -e "${sha}^{commit}" 2>/dev/null && git merge-base --is-ancestor "$tip" "$sha"; }; then
+            BRANCH_VERDICT=mr
+            BRANCH_VERDICT_REF="$ref"
+            return 0
+        fi
+    done <<< "${MR_LINES[$branch]}"
+}
+
 # Remove a worktree and optionally its branch. When the worktree has keeper
 # files, offers to keep them in place (see remove_worktree_keeping_files).
 # Usage: remove_worktree <path> <branch>
@@ -365,6 +481,7 @@ remove_worktree() {
     cd "$main_worktree" || die "Failed to cd into $main_worktree"
 
     print_yellow "Removing worktree: $selected_path"
+    show_branch_mr_status "$selected_branch"
 
     # A registered worktree whose directory is gone (prunable) has nothing to remove or check
     [[ -d "$selected_path" ]] || die "$selected_path does not exist; run without --dry-run so git worktree prune drops it"
@@ -560,18 +677,24 @@ remove_worktree() {
         fi
     fi
 
-    # Optionally delete the branch if it exists
-    if [[ "$selected_branch" != "detached" ]]; then
+    # Optionally delete the branch if it exists (never the main branch itself)
+    if [[ "$selected_branch" != "detached" ]] && ! is_main_branch "$selected_branch"; then
         local main_branch
         main_branch=$(get_main_branch)
 
-        # Check if branch is merged into main
-        if is_branch_merged "$selected_branch" "$main_branch"; then
-            # Auto-delete merged branches
+        # Merged into main by git history, or through a merged MR/PR (see branch_merge_verdict)
+        branch_merge_verdict "$selected_branch" "$main_branch"
+        if [[ "$BRANCH_VERDICT" == git ]]; then
             mutate git branch -d "$selected_branch"
             [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted (was merged into $main_branch)."
+        elif [[ "$BRANCH_VERDICT" == mr ]]; then
+            # Squash and rebase merges leave the branch unmerged for git; the merged
+            # MR/PR carried every commit the branch has, so -D loses nothing
+            mutate git branch -D "$selected_branch"
+            [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted (${BRANCH_VERDICT_REF} into $main_branch is merged and the branch has no commit beyond it)."
         else
             # Ask for unmerged branches
+            [[ "$BRANCH_VERDICT" != open-mr ]] || warn "Branch '$selected_branch' still has open ${BRANCH_VERDICT_REF}"
             echo ""
             ask delete-unmerged-branch "Also delete unmerged branch '$selected_branch'? [y/N]: " "the worktree was already removed"
             if [[ "$ASK_ANSWER" =~ ^[Yy]$ ]]; then
@@ -829,6 +952,7 @@ main() {
 
         echo -e "Current worktree: $info"
         echo -e "  ${COLOR_BOLD}${current_worktree}${COLOR_RESET}"
+        show_branch_mr_status "$current_branch"
         echo ""
         ask remove-current "Remove this worktree? [Y/n]: " "nothing was removed"
 

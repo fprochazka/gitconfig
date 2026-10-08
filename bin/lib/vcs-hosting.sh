@@ -15,9 +15,9 @@
 
 # Detect VCS host by probing APIs (expensive, use vcs_get_host for cached version)
 _vcs_detect_host_type() {
-    if gh repo view --json name >/dev/null 2>&1; then
+    if timeout "${VCS_LOOKUP_TIMEOUT:-10}" gh repo view --json name >/dev/null 2>&1; then
         echo "github"
-    elif glab repo view -F json >/dev/null 2>&1; then
+    elif timeout "${VCS_LOOKUP_TIMEOUT:-10}" glab repo view -F json >/dev/null 2>&1; then
         echo "gitlab"
     else
         return 1
@@ -47,8 +47,8 @@ vcs_get_host() {
         die "Could not detect remote type for '$remote'"
     fi
 
-    # Cache the result
-    git config "$config_key" "$host_type"
+    # Cache the result (not on a dry run, which must not write anything)
+    [[ "${DRY_RUN:-false}" == true ]] || git config "$config_key" "$host_type"
 
     echo "$host_type"
 }
@@ -160,6 +160,31 @@ vcs_get_branch_mr_id() {
     return 1
 }
 
+# List every MR/PR whose source branch is <branch>, in any state. A branch can have
+# several (stacked, retargeted, reopened), so callers must look at all lines, never
+# only the first. One page of 100 is read; a full page could hide more, so it
+# counts as a failed lookup rather than a complete list. Read-only; each API call
+# (the host probe included) is limited to VCS_LOOKUP_TIMEOUT seconds (default 10).
+# Output: one TSV line per MR/PR: <state> <ref> <target_branch> <head_sha> <merged_date>
+#   state: open, merged, locked or closed; ref: "MR !123" or "PR #123";
+#   head_sha: the source branch head the MR/PR last had ("-" if unknown);
+#   merged_date: YYYY-MM-DD or "-". No lines means no MR/PR.
+# Returns non-zero when the lookup failed (no host, no CLI, offline, timeout,
+# unparseable response); the output is then meaningless and callers must treat
+# the state as unknown, never as merged.
+# Usage: vcs_branch_mrs "branch"
+vcs_branch_mrs() {
+    local branch="$1"
+    local host
+    host=$(vcs_get_host 2>/dev/null) || return 1
+
+    case "$host" in
+        gitlab) _gitlab_branch_mrs "$branch" ;;
+        github) _github_branch_prs "$branch" ;;
+        *) return 1 ;;
+    esac
+}
+
 #
 # Fork/upstream detection
 #
@@ -264,6 +289,19 @@ _gitlab_get_branch_mr_id() {
     fi
 }
 
+_gitlab_branch_mrs() {
+    local branch="$1"
+    local json
+    json=$(timeout "${VCS_LOOKUP_TIMEOUT:-10}" glab api "projects/:id/merge_requests?source_branch=$(url_encode "$branch")&state=all&order_by=updated_at&sort=desc&per_page=100" 2>/dev/null) || return 1
+    jq -r 'if type != "array" then error("unexpected response") elif length >= 100 then error("more than one page") else .[] end
+        | [ (if .state == "opened" then "open" elif .state == "merged" then "merged" elif .state == "locked" then "locked" else "closed" end),
+            "MR !\(.iid)",
+            (.target_branch // "-"),
+            (.sha // "-"),
+            ((.merged_at // "-") | .[0:10]) ]
+        | @tsv' <<< "$json" 2>/dev/null
+}
+
 _gitlab_detect_fork() {
     local json
     if ! json=$(glab repo view -F json 2>&1); then
@@ -344,6 +382,19 @@ _github_get_branch_pr_id() {
     if [[ "$count" -eq 1 ]]; then
         echo "$json" | jq -r '.[0].number'
     fi
+}
+
+_github_branch_prs() {
+    local branch="$1"
+    local json
+    json=$(timeout "${VCS_LOOKUP_TIMEOUT:-10}" gh pr list --head "$branch" --state all --limit 100 --json number,state,baseRefName,headRefOid,mergedAt 2>/dev/null) || return 1
+    jq -r 'if type != "array" then error("unexpected response") elif length >= 100 then error("more than one page") else .[] end
+        | [ (if .state == "OPEN" then "open" elif .state == "MERGED" then "merged" else "closed" end),
+            "PR #\(.number)",
+            (.baseRefName // "-"),
+            (.headRefOid // "-"),
+            ((.mergedAt // "-") | .[0:10]) ]
+        | @tsv' <<< "$json" 2>/dev/null
 }
 
 _github_detect_fork() {
