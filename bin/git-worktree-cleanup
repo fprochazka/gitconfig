@@ -362,8 +362,9 @@ newest_mtime() {
 
 # True when the only thing that makes a plain `git worktree remove` refuse is
 # untracked content: git status shows untracked entries and nothing else (no
-# tracked change, staged change or conflict, submodule changes included), the
-# worktree has no submodules (gitlinks) and it is not locked. Anything else, or
+# tracked change, staged change or conflict, submodule changes included) and the
+# worktree has no submodules (gitlinks); a locked worktree never gets this far
+# (require_fully_removable stops it before any prompt). Anything else, or
 # a check that fails, returns false so the caller keeps asking (and --yes-safe
 # stops). Callers use it only after a complete keeper listing found no keepers,
 # so every untracked entry is one already shown as deleted with the worktree.
@@ -377,19 +378,59 @@ untracked_is_only_obstacle() {
     done <<< "$status"
 
     gitlinks=$(git -C "$wt" ls-files --stage) || return 1
-    ! grep -q '^160000 ' <<< "$gitlinks" || return 1
+    ! grep -q '^160000 ' <<< "$gitlinks"
+}
 
-    local wt_resolved entry current="" locked=false worktree_list
+# Set WORKTREE_LOCKED to true or false for a worktree (paths compared resolved).
+# Returns non-zero when that cannot be determined.
+# Usage: worktree_lock_state <worktree_path>
+WORKTREE_LOCKED=""
+worktree_lock_state() {
+    local wt="$1" wt_resolved entry current="" worktree_list
+    WORKTREE_LOCKED=""
     wt_resolved=$(realpath -e -- "$wt") || return 1
     worktree_list=$(git worktree list --porcelain) || return 1
+    WORKTREE_LOCKED=false
     while IFS= read -r entry; do
         if [[ "$entry" == "worktree "* ]]; then
             current=$(realpath -m -- "${entry#worktree }")
         elif [[ "$entry" == "locked"* && "$current" == "$wt_resolved" ]]; then
-            locked=true
+            WORKTREE_LOCKED=true
         fi
     done <<< "$worktree_list"
-    [[ "$locked" == false ]]
+}
+
+# Die unless git can delete the whole worktree: it is not locked, and every
+# directory in it (the worktree dir included, its .git file excluded) and its
+# parent are writable, readable and searchable, so `git worktree remove` cannot
+# fail halfway and leave a half-deleted, unregistered worktree behind. Symlinks
+# are not followed. A directory that cannot be searched fails the check too.
+# Usage: require_fully_removable <worktree_path>
+require_fully_removable() {
+    local wt="$1" blocked_file
+    worktree_lock_state "$wt" || die "Cannot tell whether $wt is locked; this worktree was not removed"
+    [[ "$WORKTREE_LOCKED" == false ]] || die "$wt is locked (git worktree unlock $(printf '%q' "$wt") first); this worktree was not removed"
+
+    [[ -w "$(dirname "$wt")" && -x "$(dirname "$wt")" ]] || die "$(dirname "$wt") is not writable, so $wt cannot be deleted; this worktree was not removed"
+
+    blocked_file=$(mktemp) || die "Failed to create a temp file; this worktree was not removed"
+    # Relative to the worktree, so its own .git file is pruned by a literal path,
+    # never by a pattern built from the worktree path
+    local find_ok=true
+    (cd -- "$wt" && find -P . -path ./.git -prune -o -type d \( ! -writable -o ! -readable -o ! -executable \) -print0) > "$blocked_file" \
+        || find_ok=false
+    local -a blocked=()
+    mapfile -d '' -t blocked < "$blocked_file"
+    rm -f -- "$blocked_file"
+    if [[ ${#blocked[@]} -gt 0 ]]; then
+        warn "git could not delete everything in these directories (not writable, readable or searchable by you):"
+        local dir
+        for dir in "${blocked[@]}"; do
+            printf '  %s\n' "${wt}/${dir#./}" >&2
+        done
+    fi
+    [[ "$find_ok" == true ]] || die "Could not check every directory of $wt (see above); this worktree was not removed"
+    [[ ${#blocked[@]} -eq 0 ]] || die "Fix their permissions first (e.g. chmod u+rwx); this worktree was not removed"
 }
 
 # MR/PR lookups per branch, made at most once per run (see vcs_branch_mrs)
@@ -551,6 +592,9 @@ remove_worktree() {
 
     # git worktree remove, forced or not, deletes ignored files and does not stop at mount points
     require_no_mounts "$selected_path" "remove $selected_path"
+
+    # Locked or partly undeletable: git would refuse late or stop halfway
+    require_fully_removable "$selected_path"
 
     # A list that could not be completed must never decide what survives a forced removal
     local keepers_file discarded_file
