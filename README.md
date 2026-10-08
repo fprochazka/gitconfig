@@ -77,7 +77,7 @@ This gitconfig provides many custom git commands and aliases for enhanced produc
 ### Branch Management & Cleanup
 - **`git com`** - Checkout main branch, pull, and also run `git cleanup`
 - **`git cleanup`** - Fetch all remotes, prune, and drop merged/gone branches
-- **`git branches-gc [--merged] [--gone] [--drop]`** - List/delete stale branches (merged or gone), excludes worktree branches
+- **`git branches-gc [--merged] [--gone] [--drop]`** - List/delete stale branches (merged or gone), excludes worktree branches and merged branches ahead of their remote copy; a failed deletion is reported and skipped
 
 ### Stacked Branch Workflows
 - **`git branches-stacked-list`** - List branches containing commits from current branch

@@ -5,7 +5,8 @@
 # Usage: git branches-gc [--merged] [--gone] [--drop]
 #
 # Lists branches that are either merged into main or have gone remotes.
-# Excludes current branch, main branches, and branches in worktrees.
+# Excludes current branch, main branches, branches in worktrees, and merged
+# branches ahead of their remote copy.
 #
 
 set -euo pipefail
@@ -26,7 +27,8 @@ Filters:
     If neither --merged nor --gone is specified, both are included.
 
 Actions:
-    --drop      Delete the listed branches (merged with -d, gone with -D)
+    --drop      Delete the listed branches (merged with -d, gone with -D); a branch that cannot be
+                deleted is reported and skipped, and the command exits 1 at the end
 
 Excludes:
   - Current branch (marked with *)
@@ -43,21 +45,48 @@ EOF
 }
 
 # Get merged branches (excluding main, develop, and branches checked out in any worktree, the current one included)
-# Prints refname:short, the name the branch was always listed and deleted under
+# Prints "<branch>:" for a branch to delete and "<branch>:<reason>" for one to keep. <branch> is refname:short,
+# the name the branch was always listed and deleted under; ":" cannot occur in a ref name.
+#
+# A branch ahead of its remote copy is kept even when merged: those commits are unpushed work. The remote copy is the
+# push destination when it exists (push.default=current gives origin/<b> also for a branch whose upstream is
+# origin/master), otherwise the upstream, the same rule as branch_merge_verdict in git-worktree-cleanup.
+# The :track atoms say "[gone]" for a missing ref and "[ahead N]" or "[ahead N, behind M]" for one it is ahead of.
 get_merged_branches() {
     local main_branch="$1"
 
     # merge-base --is-ancestor against a missing main branch fails for every branch, so nothing is merged
     git rev-parse --quiet --verify "${main_branch}^{commit}" >/dev/null || return 0
 
-    git for-each-ref --merged "$main_branch" --format='%(if)%(worktreepath)%(then)%(else)%(refname:short)%(end)' refs/heads/ | while read -r branch; do
+    local refs
+    if ! refs=$(git for-each-ref --merged "$main_branch" --format='%(if)%(worktreepath)%(then)%(else)%(refname:short):%(push):%(push:track):%(upstream):%(upstream:track)%(end)' refs/heads/); then
+        warn "Cannot compare merged branches with their remote copies, keeping all of them"
+        return 0
+    fi
+
+    local branch push_ref push_track upstream_ref upstream_track compare_ref compare_track
+    while IFS=: read -r branch push_ref push_track upstream_ref upstream_track; do
         [[ -z "$branch" ]] && continue
 
         # Skip main/develop branches
         [[ "$branch" =~ ^(master|main|develop)$ ]] && continue
 
-        echo "$branch"
-    done
+        compare_ref=""
+        compare_track=""
+        if [[ "$push_ref" == refs/remotes/* ]] && [[ "$push_track" != "[gone]" ]]; then
+            compare_ref="$push_ref"
+            compare_track="$push_track"
+        elif [[ "$upstream_ref" == refs/remotes/* ]] && [[ "$upstream_track" != "[gone]" ]]; then
+            compare_ref="$upstream_ref"
+            compare_track="$upstream_track"
+        fi
+
+        if [[ "$compare_track" =~ ahead\ ([0-9]+) ]]; then
+            echo "${branch}:skipped (ahead of ${compare_ref#refs/remotes/} by ${BASH_REMATCH[1]})"
+        else
+            echo "${branch}:"
+        fi
+    done <<< "$refs"
 }
 
 # Get gone branches (excluding branches checked out in any worktree, the current one included)
@@ -118,13 +147,20 @@ main() {
     local -a merged_branches=()
     local -a gone_branches=()
 
+    # Merged branches kept because they are ahead of their remote copy, with the reason
+    local -A skip_reasons=()
+    local reason
+
     if [[ "$include_merged" == true ]]; then
-        while IFS= read -r branch; do
-            [[ -n "$branch" ]] && merged_branches+=("$branch")
+        while IFS=: read -r branch reason; do
+            [[ -z "$branch" ]] && continue
+            merged_branches+=("$branch")
+            [[ -n "$reason" ]] && skip_reasons[$branch]="$reason"
         done < <(get_merged_branches "$main_branch")
     fi
 
     if [[ "$include_gone" == true ]]; then
+        # Merged branches, kept ones included, are never deleted again as gone
         local -A merged_set=()
         for branch in "${merged_branches[@]+"${merged_branches[@]}"}"; do
             merged_set[$branch]=1
@@ -140,9 +176,15 @@ main() {
     if [[ "$include_merged" == true ]] && [[ "$do_drop" == true ]]; then
         echo "Removing cleanly merged branches."
     fi
+    local failed=false
     for branch in "${merged_branches[@]+"${merged_branches[@]}"}"; do
-        if [[ "$do_drop" == true ]]; then
-            git branch -d "$branch"
+        if [[ -n "${skip_reasons[$branch]+set}" ]]; then
+            echo "${branch} ${skip_reasons[$branch]}"
+        elif [[ "$do_drop" == true ]]; then
+            if ! git branch -d "$branch"; then
+                warn "Could not delete branch ${branch}, continuing"
+                failed=true
+            fi
         else
             echo "$branch"
         fi
@@ -154,11 +196,18 @@ main() {
     fi
     for branch in "${gone_branches[@]+"${gone_branches[@]}"}"; do
         if [[ "$do_drop" == true ]]; then
-            git branch -D "$branch"
+            if ! git branch -D "$branch"; then
+                warn "Could not delete branch ${branch}, continuing"
+                failed=true
+            fi
         else
             echo "$branch"
         fi
     done
+
+    if [[ "$failed" == true ]]; then
+        exit 1
+    fi
 }
 
 main "$@"
