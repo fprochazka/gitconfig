@@ -1071,12 +1071,32 @@ main() {
         current_mode=true
     fi
 
+    # Run from inside an already archived worktree dir (no .git, so git resolved the
+    # main checkout around it). As a git alias it runs from the top level and
+    # GIT_PREFIX holds the directory it was invoked in; run directly, that is $PWD
+    local archived_dir=""
+    if [[ "$current_worktree" == "$main_worktree" ]]; then
+        local probe="$PWD"
+        [[ -z "${GIT_PREFIX:-}" ]] || probe="${main_worktree}/${GIT_PREFIX%/}"
+        while [[ "$probe" == "${main_worktree}/"* ]]; do
+            if [[ -f "${probe}/${WORKTREE_ARCHIVED_MARKER}" ]]; then
+                archived_dir="$probe"
+                break
+            fi
+            probe=$(dirname -- "$probe")
+        done
+    fi
+
     # --yes-safe only ever cleans up the worktree it runs in, never a selection: list
     # numbers shift when worktrees are created between runs
     if [[ "$ASSUME_YES" == true ]]; then
         [[ "$force_interactive" == false ]] || die "--yes-safe cannot be combined with -i; it only cleans up the current worktree"
         [[ "$list_only" == false ]] || die "--yes-safe cannot be combined with --list"
+        [[ -z "$archived_dir" ]] || die "${archived_dir} is an archived worktree (see ${WORKTREE_ARCHIVED_MARKER}), nothing to remove"
         [[ "$current_worktree" != "$main_worktree" ]] || die "--yes-safe only works inside a linked worktree, this is the main repository"
+    fi
+    if [[ -n "$archived_dir" ]]; then
+        print_dim "${archived_dir} is an archived worktree (see ${WORKTREE_ARCHIVED_MARKER}), nothing to remove there; showing all worktrees of the repository"
     fi
     if [[ "$FORCE_UNMERGED" == true ]] && [[ "$current_mode" == false ]]; then
         die "--force only applies when cleaning up the current worktree from inside it"
