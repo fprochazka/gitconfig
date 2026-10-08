@@ -31,6 +31,9 @@ KEEP_FILES_FOR_ALL=false
 # Kept files written this recently make the removal ask once more: a session may still be running there
 RECENT_WRITE_SECONDS=600
 
+# How many lines of the kept-files listing to print after a keep-in-place removal
+KEPT_LISTING_LINES=200
+
 # --yes-safe: answer the questions of a current-worktree cleanup without a terminal.
 # Only the prompt ids below get an answer; any other prompt stops the run.
 ASSUME_YES=false
@@ -290,6 +293,23 @@ remove_worktree_keeping_files() {
     clear_interrupt_note
 
     print_green "Worktree removed, $# unversioned files kept in place: $wt"
+
+    # Show what stayed, at most KEPT_LISTING_LINES lines; read-only, and a listing
+    # failure never fails the run
+    local listing=""
+    if command -v tree >/dev/null 2>&1; then
+        listing=$(tree -a "$wt") || warn "Could not list $wt with tree"
+    else
+        listing=$(cd -- "$wt" && find . -mindepth 1 | LC_ALL=C sort) || warn "Could not list $wt"
+    fi
+    if [[ -n "$listing" ]]; then
+        local -a listing_lines=()
+        mapfile -t listing_lines <<< "$listing"
+        printf '%s\n' "${listing_lines[@]:0:KEPT_LISTING_LINES}"
+        if [[ ${#listing_lines[@]} -gt $KEPT_LISTING_LINES ]]; then
+            echo "… $(( ${#listing_lines[@]} - KEPT_LISTING_LINES )) more lines"
+        fi
+    fi
 }
 
 # Print what a forced removal of a worktree would lose besides unversioned files:
