@@ -20,7 +20,7 @@
 	slurp = !git restore --source=HEAD^ --staged . && git commit --amend --allow-empty --no-edit
 
 	# checkout master with cleanup
-	com = !git co "$(git get-main-branch)" && git pull && git cleanup
+	com = !git co "$(git get-main-branch)" && git pull && git branches-gc --drop
 
 	# drop branches that were merged into remote or were removed from remote
 	cleanup = !git fetch --all --prune && git branches-gc --drop
