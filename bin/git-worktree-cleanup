@@ -54,10 +54,12 @@ FORCE_UNMERGED=false
 # Every prompt goes through ask, so --yes-safe cannot auto-answer a question it does
 # not know. Sets ASK_ANSWER. End of input never counts as an answer: it stops
 # the run instead of falling back to the prompt's default.
-# Usage: ask <prompt_id> <question> <what has happened so far, for the stop message>
+# With "eof-means-no" (only for a prompt after the worktree was removed, where
+# stopping would hide that the removal happened) end of input answers "n" instead.
+# Usage: ask <prompt_id> <question> <what has happened so far, for the stop message> [eof-means-no]
 ASK_ANSWER=""
 ask() {
-    local id="$1" question="$2" so_far="$3"
+    local id="$1" question="$2" so_far="$3" on_eof="${4:-}"
     ASK_ANSWER=""
     if [[ "$ASSUME_YES" == true ]]; then
         if [[ -n "${YES_ANSWERS[$id]:-}" ]]; then
@@ -68,7 +70,14 @@ ask() {
         die "--yes-safe does not answer \"${question% }\"; stopping, ${so_far}"
     fi
     echo -n "$question"
-    IFS= read -r ASK_ANSWER || die "No answer (end of input); stopping, ${so_far}"
+    if ! IFS= read -r ASK_ANSWER; then
+        if [[ "$on_eof" == eof-means-no ]]; then
+            echo "n (end of input)"
+            ASK_ANSWER=n
+            return 0
+        fi
+        die "No answer (end of input); stopping, ${so_far}"
+    fi
 }
 
 show_help() {
@@ -88,7 +97,8 @@ of all worktrees with branch information including:
 Run from inside a linked worktree, it cleans up that worktree, and only when its
 branch is merged into the main branch: by git history, or by a merged MR/PR into
 the main branch whose head contains the branch tip, with no MR/PR of the branch
-still open. Otherwise it stops before touching anything, unless --force.
+still open, and not ahead of its still existing upstream remote-tracking branch.
+Otherwise it stops before touching anything, unless --force.
 
 A worktree with submodules is removed only when every submodule, recursively, is
 clean (no change, no untracked file, only build/IDE ignored files), has nothing
@@ -848,17 +858,60 @@ show_branch_mr_status() {
 #             ancestor of it, so the branch has no commit the MR did not carry
 #   open-mr - an MR/PR of the branch is still open (or locked): work may continue there, so the
 #             branch never counts as merged, whatever else holds
+#   ahead-of-upstream - the branch has commits that its still existing remote-
+#             tracking upstream, or its push destination (push.default=current and
+#             remote.pushDefault give one without an upstream), lacks: unpushed work,
+#             whatever else holds. BRANCH_VERDICT_REF is the ref, BRANCH_AHEAD_TEXT
+#             the phrase for messages (with the count, or saying it failed). A gone ref (deleted after the merge) does not count
 #   unknown - the MR lookup failed and git history does not show the branch merged
 #   no      - none of the above (including a detached HEAD)
-# BRANCH_VERDICT_REF names the MR/PR behind "mr" or "open-mr".
+# BRANCH_VERDICT_REF names the MR/PR behind "mr" or "open-mr", and the remote-tracking
+# ref behind "ahead-of-upstream".
 # Usage: branch_merge_verdict <branch> <main_branch>
 BRANCH_VERDICT=""
 BRANCH_VERDICT_REF=""
+BRANCH_AHEAD_TEXT=""
 branch_merge_verdict() {
     local branch="$1" main_branch="$2"
     BRANCH_VERDICT=no
     BRANCH_VERDICT_REF=""
+    BRANCH_AHEAD_TEXT=""
     [[ "$branch" != "detached" ]] || return 0
+
+    # Commits that the branch's existing upstream or push destination lacks are
+    # unpushed work, even when the branch is an ancestor of main or covered by a
+    # merged MR. Both refs of exactly refs/heads/<branch> come from for-each-ref
+    # (<ref>@{upstream} is rejected for a full ref name, and a bare name could hit a
+    # tag); empty means none. A failed lookup refuses rather than passing as "none".
+    local tracking=""
+    # ":" cannot occur in a ref name, so it separates the two safely
+    if ! tracking=$(git for-each-ref --format='%(upstream):%(push)' "refs/heads/${branch}"); then
+        BRANCH_VERDICT="ahead-of-upstream"
+        BRANCH_VERDICT_REF="its upstream"
+        BRANCH_AHEAD_TEXT="may have commits its upstream or push destination lacks (the lookup failed)"
+        return 0
+    fi
+    local -a tracking_refs=("${tracking%%:*}" "${tracking#*:}")
+    local tracking_ref kind="upstream" ahead
+    for tracking_ref in "${tracking_refs[@]}"; do
+        if [[ "$tracking_ref" == refs/remotes/* ]] && git show-ref --verify --quiet "$tracking_ref"; then
+            ahead=""
+            if ! ahead=$(git rev-list --count "${tracking_ref}..refs/heads/${branch}"); then
+                ahead="?"
+            fi
+            if [[ "$ahead" != 0 ]]; then
+                BRANCH_VERDICT="ahead-of-upstream"
+                BRANCH_VERDICT_REF="${tracking_ref#refs/remotes/}"
+                if [[ "$ahead" == "?" ]]; then
+                    BRANCH_AHEAD_TEXT="has commits its ${kind} ${BRANCH_VERDICT_REF} lacks (the count failed)"
+                else
+                    BRANCH_AHEAD_TEXT="is ${ahead} commits ahead of its ${kind} ${BRANCH_VERDICT_REF}"
+                fi
+                return 0
+            fi
+        fi
+        kind="push destination"
+    done
 
     lookup_branch_mrs "$branch"
     local state ref target sha merged_date
@@ -909,6 +962,13 @@ require_merged_or_force() {
     case "$BRANCH_VERDICT" in
         git|mr) return 0 ;;
         open-mr) why="it still has open ${BRANCH_VERDICT_REF}, so work may continue on it" ;;
+        ahead-of-upstream)
+            if [[ "$FORCE_UNMERGED" == true ]]; then
+                warn "Branch '${branch}' ${BRANCH_AHEAD_TEXT}. --force: cleaning up the worktree anyway; the branch is kept."
+                return 0
+            fi
+            die "Branch '${branch}' ${BRANCH_AHEAD_TEXT}; push it or delete that remote branch first. Nothing was removed. Run again with --force to remove the worktree anyway (the branch is kept; every other safety check still applies)."
+            ;;
         unknown) why="git history does not show it merged into ${main_branch} and its MR state is unknown (the lookup failed)" ;;
         *)
             if [[ "$branch" == "detached" ]]; then
@@ -1206,28 +1266,45 @@ remove_worktree() {
 
         # Merged into main by git history, or through a merged MR/PR (see branch_merge_verdict)
         branch_merge_verdict "$selected_branch" "$main_branch"
+        # The worktree is gone by now: a branch that cannot be deleted is kept with a
+        # warning and the run still ends successfully, so callers can tell a removal
+        # from a refusal
+        local delete_hint
+        delete_hint="delete it with: git branch -D $(printf '%q' "$selected_branch")"
         if [[ "$BRANCH_VERDICT" == git ]]; then
-            mutate git branch -d "$selected_branch"
-            [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted (was merged into $main_branch)."
+            if mutate git branch -d "$selected_branch"; then
+                [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted (was merged into $main_branch)."
+            else
+                warn "git branch -d refused; kept branch '$selected_branch'; $delete_hint"
+            fi
         elif [[ "$BRANCH_VERDICT" == mr ]]; then
             # Squash and rebase merges leave the branch unmerged for git; the merged
             # MR/PR carried every commit the branch has, so -D loses nothing
-            mutate git branch -D "$selected_branch"
-            [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted (${BRANCH_VERDICT_REF} into $main_branch is merged and the branch has no commit beyond it)."
+            if mutate git branch -D "$selected_branch"; then
+                [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted (${BRANCH_VERDICT_REF} into $main_branch is merged and the branch has no commit beyond it)."
+            else
+                warn "git branch -D failed; kept branch '$selected_branch'; $delete_hint"
+            fi
         else
             # Ask for unmerged branches; --force never deletes one
             [[ "$BRANCH_VERDICT" != open-mr ]] || warn "Branch '$selected_branch' still has open ${BRANCH_VERDICT_REF}"
+            [[ "$BRANCH_VERDICT" != ahead-of-upstream ]] || warn "Branch '$selected_branch' ${BRANCH_AHEAD_TEXT} (unpushed work)"
+            local kept_what="unmerged branch"
+            [[ "$BRANCH_VERDICT" != ahead-of-upstream ]] || kept_what="unpushed branch"
             if [[ "$FORCE_UNMERGED" == true ]]; then
-                echo "Kept unmerged branch '$selected_branch' (--force); delete it with: git branch -D $(printf '%q' "$selected_branch")"
+                echo "Kept ${kept_what} '$selected_branch' (--force); $delete_hint"
                 return 0
             fi
             echo ""
-            ask delete-unmerged-branch "Also delete unmerged branch '$selected_branch'? [y/N]: " "the worktree was already removed"
+            ask delete-unmerged-branch "Also delete ${kept_what} '$selected_branch'? [y/N]: " "the worktree was already removed" eof-means-no
             if [[ "$ASK_ANSWER" =~ ^[Yy]$ ]]; then
-                mutate git branch -D "$selected_branch"
-                [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted."
+                if mutate git branch -D "$selected_branch"; then
+                    [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted."
+                else
+                    warn "git branch -D failed; kept branch '$selected_branch'; $delete_hint"
+                fi
             else
-                echo "Kept unmerged branch '$selected_branch'; delete it with: git branch -D $(printf '%q' "$selected_branch")"
+                echo "Kept ${kept_what} '$selected_branch'; $delete_hint"
             fi
         fi
     fi
