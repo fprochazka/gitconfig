@@ -30,9 +30,39 @@ KEEP_FILES_FOR_ALL=false
 # Kept files written this recently make the removal ask once more: a session may still be running there
 RECENT_WRITE_SECONDS=600
 
+# --yes-safe: answer the questions of a current-worktree cleanup without a terminal.
+# Only the prompt ids below get an answer; any other prompt stops the run.
+ASSUME_YES=false
+declare -rA YES_ANSWERS=(
+    [remove-current]=y          # Remove this worktree?
+    [keep-files]=y              # Keep the unversioned files in place? (never no)
+    [delete-unmerged-branch]=n  # an unmerged branch is never deleted
+    [remove-orphans]=n          # orphaned directories are never deleted
+)
+
+# Every prompt goes through ask, so --yes-safe cannot auto-answer a question it does
+# not know. Sets ASK_ANSWER. End of input never counts as an answer: it stops
+# the run instead of falling back to the prompt's default.
+# Usage: ask <prompt_id> <question> <what has happened so far, for the stop message>
+ASK_ANSWER=""
+ask() {
+    local id="$1" question="$2" so_far="$3"
+    ASK_ANSWER=""
+    if [[ "$ASSUME_YES" == true ]]; then
+        if [[ -n "${YES_ANSWERS[$id]:-}" ]]; then
+            ASK_ANSWER="${YES_ANSWERS[$id]}"
+            echo "${question}${ASK_ANSWER} (--yes-safe)"
+            return 0
+        fi
+        die "--yes-safe does not answer \"${question% }\"; stopping, ${so_far}"
+    fi
+    echo -n "$question"
+    IFS= read -r ASK_ANSWER || die "No answer (end of input); stopping, ${so_far}"
+}
+
 show_help() {
     cat << 'EOF'
-Usage: git worktree-cleanup [-i|--interactive] [-l|--list] [-n|--dry-run] [--no-signals]
+Usage: git worktree-cleanup [-i|--interactive] [-l|--list] [-n|--dry-run] [--yes-safe] [--no-signals]
 
 Interactively remove git worktrees.
 
@@ -57,12 +87,19 @@ Options:
     -i, --interactive   Force interactive selection even when in a worktree
     -l, --list          Only print the list and exit (read-only: no prune, no prompts)
     -n, --dry-run       Print every removal and move instead of doing it
+    --yes-safe          Clean up the current worktree without asking: remove it,
+                        keep its unversioned files in place, keep an unmerged
+                        branch, skip orphaned directories. Every safety question
+                        (unsaved changes, recently written files, git refusing a
+                        plain removal, ...) stops the run instead. Only inside a
+                        linked worktree; combines with --dry-run only
     --no-signals        Skip the keep/sessions scan (faster on hundreds of worktrees)
 
 Examples:
     git worktree-cleanup        # Clean current worktree, or list if in main repo
     git worktree-cleanup -i     # Always show interactive list
     git worktree-cleanup -l     # Just print the list
+    git worktree-cleanup --yes-safe  # Clean up the current worktree, no questions
 EOF
 }
 
@@ -281,6 +318,38 @@ newest_mtime() {
         | awk 'BEGIN { max = 0 } { if ($1 > max) max = $1 } END { print max }'
 }
 
+# True when the only thing that makes a plain `git worktree remove` refuse is
+# untracked content: git status shows untracked entries and nothing else (no
+# tracked change, staged change or conflict, submodule changes included), the
+# worktree has no submodules (gitlinks) and it is not locked. Anything else, or
+# a check that fails, returns false so the caller keeps asking (and --yes-safe
+# stops). Callers use it only after a complete keeper listing found no keepers,
+# so every untracked entry is one already shown as deleted with the worktree.
+# Usage: untracked_is_only_obstacle <worktree_path>
+untracked_is_only_obstacle() {
+    local wt="$1" status gitlinks line
+    status=$(git -C "$wt" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none) || return 1
+    [[ -n "$status" ]] || return 1
+    while IFS= read -r line; do
+        [[ "$line" == "?? "* ]] || return 1
+    done <<< "$status"
+
+    gitlinks=$(git -C "$wt" ls-files --stage) || return 1
+    ! grep -q '^160000 ' <<< "$gitlinks" || return 1
+
+    local wt_resolved entry current="" locked=false worktree_list
+    wt_resolved=$(realpath -e -- "$wt") || return 1
+    worktree_list=$(git worktree list --porcelain) || return 1
+    while IFS= read -r entry; do
+        if [[ "$entry" == "worktree "* ]]; then
+            current=$(realpath -m -- "${entry#worktree }")
+        elif [[ "$entry" == "locked"* && "$current" == "$wt_resolved" ]]; then
+            locked=true
+        fi
+    done <<< "$worktree_list"
+    [[ "$locked" == false ]]
+}
+
 # Remove a worktree and optionally its branch. When the worktree has keeper
 # files, offers to keep them in place (see remove_worktree_keeping_files).
 # Usage: remove_worktree <path> <branch>
@@ -324,6 +393,48 @@ remove_worktree() {
         [[ ${#discarded[@]} -le 10 ]] || echo "  … and $(( ${#discarded[@]} - 10 )) more"
     fi
 
+    # A nested repository (a clone under build/, node_modules/, out/ ...) is never
+    # build output: deleting it with the worktree needs an explicit yes
+    if [[ ${#discarded[@]} -gt 0 ]]; then
+        # Discarded directories, without any that lies inside another listed one,
+        # so nothing is walked or reported twice
+        local -a search_dirs=()
+        local entry outer inside
+        for entry in "${discarded[@]}"; do
+            [[ "$entry" == */ ]] || continue
+            [[ -d "${selected_path}/${entry}" && ! -L "${selected_path}/${entry%/}" ]] || continue
+            inside=false
+            for outer in "${discarded[@]}"; do
+                if [[ "$outer" == */ && "$outer" != "$entry" && "$entry" == "$outer"* ]]; then
+                    inside=true
+                    break
+                fi
+            done
+            [[ "$inside" == true ]] || search_dirs+=("${entry%/}")
+        done
+
+        # -P: never follow symlinks; prune at the first .git of each nested repo.
+        # Fails closed: a directory that cannot be fully searched stops the run.
+        local -a nested_repos=() found=()
+        local found_file
+        found_file=$(mktemp) || die "Failed to create a temp file; this worktree was not removed"
+        for entry in "${search_dirs[@]}"; do
+            if ! find -P "${selected_path}/${entry}" -name .git -prune -printf '%h\0' > "$found_file"; then
+                rm -f -- "$found_file"
+                die "Could not search ${selected_path}/${entry} for nested repositories (see above); this worktree was not removed"
+            fi
+            mapfile -d '' -t found < "$found_file"
+            nested_repos+=("${found[@]}")
+        done
+        rm -f -- "$found_file"
+        if [[ ${#nested_repos[@]} -gt 0 ]]; then
+            warn "These directories deleted with the worktree contain a git repository:"
+            printf '  %s\n' "${nested_repos[@]}"
+            ask delete-nested-repos "Delete them with the worktree? [y/N]: " "this worktree was not removed"
+            [[ "$ASK_ANSWER" =~ ^[Yy]$ ]] || die "Aborted; this worktree was not removed."
+        fi
+    fi
+
     local remove_error=""
     local keep_files=false
     if [[ ${#keepers[@]} -gt 0 ]]; then
@@ -339,24 +450,20 @@ remove_worktree() {
         age=$(( $(date +%s) - newest ))
         if [[ "$newest" -gt 0 ]] && [[ "$age" -lt "$RECENT_WRITE_SECONDS" ]]; then
             warn "The newest of these files was written ${age} s ago; something (a Claude session?) may still be writing in this worktree."
-            echo -n "Continue removing it? [y/N]: "
-            local recent_answer=""
-            read -r recent_answer || true
-            [[ "$recent_answer" =~ ^[Yy]$ ]] || die "Aborted."
+            ask recent-write "Continue removing it? [y/N]: " "this worktree was not removed"
+            [[ "$ASK_ANSWER" =~ ^[Yy]$ ]] || die "Aborted; this worktree was not removed."
         fi
         if [[ "$KEEP_FILES_FOR_ALL" == true ]]; then
             echo "Keeping them in place (yes for all)."
             keep_files=true
         else
             if [[ "$MULTI_REMOVAL" == true ]]; then
-                echo -n "Keep them in place after removing the worktree? [Y/n/a=yes for all]: "
+                ask keep-files-multi "Keep them in place after removing the worktree? [Y/n/a=yes for all]: " "this worktree was not removed"
             else
-                echo -n "Keep them in place after removing the worktree? [Y/n]: "
+                ask keep-files "Keep them in place after removing the worktree? [Y/n]: " "this worktree was not removed"
             fi
-            local keep_answer=""
-            read -r keep_answer || true
-            [[ "$keep_answer" =~ ^[Nn]$ ]] || keep_files=true
-            if [[ "$MULTI_REMOVAL" == true ]] && [[ "$keep_answer" =~ ^[Aa]$ ]]; then
+            [[ "$ASK_ANSWER" =~ ^[Nn]$ ]] || keep_files=true
+            if [[ "$MULTI_REMOVAL" == true ]] && [[ "$ASK_ANSWER" =~ ^[Aa]$ ]]; then
                 KEEP_FILES_FOR_ALL=true
             fi
         fi
@@ -368,10 +475,8 @@ remove_worktree() {
     if [[ -n "$unsaved" ]]; then
         warn "Worktree has unsaved state that removing it discards:"
         echo "$unsaved"
-        echo -n "Discard it and remove anyway? [y/N]: "
-        local discard_answer=""
-        read -r discard_answer || true
-        [[ "$discard_answer" =~ ^[Yy]$ ]] || die "Aborted."
+        ask discard-unsaved "Discard it and remove anyway? [y/N]: " "this worktree was not removed"
+        [[ "$ASK_ANSWER" =~ ^[Yy]$ ]] || die "Aborted; this worktree was not removed."
     fi
 
     if [[ "$keep_files" == true ]]; then
@@ -392,18 +497,52 @@ remove_worktree() {
         remove_worktree_keeping_files "$selected_path" "$main_worktree" "${keepers[@]}"
         # The directory stays, so its Claude Code project entry stays too
     else
+        # Under --yes-safe only: with no keepers, every untracked entry was classified
+        # and shown above as deleted with the worktree; if that is all git can object
+        # to and nothing unsaved was found (not merely confirmed), removing it is keep
+        # mode with nothing to keep, so it is forced instead of stopping at the prompt.
+        # Interactively the force-remove question is still asked.
+        local only_discarded=false
+        if [[ "$ASSUME_YES" == true ]] && [[ ${#keepers[@]} -eq 0 ]] && [[ -z "$unsaved" ]] \
+            && untracked_is_only_obstacle "$selected_path"; then
+            only_discarded=true
+        fi
+
         # Remove the worktree, offering --force if it has modifications
         if [[ "$DRY_RUN" == true ]]; then
-            mutate git worktree remove "$selected_path"
+            if [[ "$only_discarded" == true ]]; then
+                mutate git worktree remove --force "$selected_path"
+            else
+                mutate git -c status.showUntrackedFiles=normal worktree remove "$selected_path"
+            fi
         else
+            if [[ "$only_discarded" == true ]]; then
+                # A keeper written since the listing would be deleted by the force
+                local relisted_none
+                relisted_none=$(mktemp) || die "Failed to create a temp file"
+                if ! list_worktree_keeper_files "$selected_path" "$main_worktree" > "$relisted_none"; then
+                    rm -f -- "$relisted_none"
+                    die "Could not list all unversioned files of $selected_path again (see above); nothing was removed"
+                fi
+                if [[ -s "$relisted_none" ]]; then
+                    warn "Files worth keeping appeared since the listing:"
+                    tr '\0' '\n' < "$relisted_none" | sed 's/^/  /'
+                    rm -f -- "$relisted_none"
+                    die "Nothing was removed; run it again"
+                fi
+                rm -f -- "$relisted_none"
+            fi
+
             # Re-check right before the removal: the prompts above may have waited a while
             require_no_mounts "$selected_path" "remove $selected_path"
-            if ! remove_error=$(git worktree remove "$selected_path" 2>&1); then
+            if [[ "$only_discarded" == true ]]; then
+                git worktree remove --force "$selected_path"
+            # Pinned: with status.showUntrackedFiles=no git would delete untracked files
+            # in a plain removal instead of refusing
+            elif ! remove_error=$(git -c status.showUntrackedFiles=normal worktree remove "$selected_path" 2>&1); then
                 warn "git worktree remove refused: ${remove_error}"
-                echo -n "Force remove? [y/N]: "
-                local confirm=""
-                read -r confirm || true
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                ask force-remove "Force remove? [y/N]: " "this worktree was not removed"
+                if [[ "$ASK_ANSWER" =~ ^[Yy]$ ]]; then
                     # git worktree remove --force does not stop at mount points
                     require_no_mounts "$selected_path" "force-remove $selected_path"
                     git worktree remove --force "$selected_path"
@@ -434,12 +573,12 @@ remove_worktree() {
         else
             # Ask for unmerged branches
             echo ""
-            echo -n "Also delete unmerged branch '$selected_branch'? [y/N]: "
-            local delete_branch=""
-            read -r delete_branch || true
-            if [[ "$delete_branch" =~ ^[Yy]$ ]]; then
+            ask delete-unmerged-branch "Also delete unmerged branch '$selected_branch'? [y/N]: " "the worktree was already removed"
+            if [[ "$ASK_ANSWER" =~ ^[Yy]$ ]]; then
                 mutate git branch -D "$selected_branch"
                 [[ "$DRY_RUN" == true ]] || print_green "Branch '$selected_branch' deleted."
+            else
+                echo "Kept unmerged branch '$selected_branch'; delete it with: git branch -D $(printf '%q' "$selected_branch")"
             fi
         fi
     fi
@@ -591,11 +730,10 @@ cleanup_orphaned_dirs() {
         echo "  ${dir}/"
     done
     echo ""
-    echo -n "Remove all orphaned directories? [y/N]: "
-    local confirm=""
-    read -r confirm || true
-
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    ask remove-orphans "Remove all orphaned directories? [y/N]: " "nothing was removed"
+    if [[ ! "$ASK_ANSWER" =~ ^[Yy]$ ]]; then
+        echo "Skipped ${#orphaned[@]} orphaned directories."
+    else
         for dir in "${orphaned[@]}"; do
             safe_rm_rf "$dir" "$(dirname "$dir")" "$main_worktree" "${worktrees_dirs[@]}"
             if [[ "$DRY_RUN" == false ]]; then
@@ -635,6 +773,10 @@ main() {
                 DRY_RUN=true
                 shift
                 ;;
+            --yes-safe)
+                ASSUME_YES=true
+                shift
+                ;;
             *)
                 die "Unknown option: $1"
                 ;;
@@ -645,6 +787,14 @@ main() {
 
     local main_worktree
     main_worktree=$(get_main_repo_root)
+
+    # --yes-safe only ever cleans up the worktree it runs in, never a selection: list
+    # numbers shift when worktrees are created between runs
+    if [[ "$ASSUME_YES" == true ]]; then
+        [[ "$force_interactive" == false ]] || die "--yes-safe cannot be combined with -i; it only cleans up the current worktree"
+        [[ "$list_only" == false ]] || die "--yes-safe cannot be combined with --list"
+        [[ "$(git rev-parse --show-toplevel)" != "$main_worktree" ]] || die "--yes-safe only works inside a linked worktree, this is the main repository"
+    fi
 
     # --list is strictly read-only: no pruning, no orphan cleanup, no prompts
     if [[ "$list_only" == false ]]; then
@@ -680,10 +830,9 @@ main() {
         echo -e "Current worktree: $info"
         echo -e "  ${COLOR_BOLD}${current_worktree}${COLOR_RESET}"
         echo ""
-        echo -n "Remove this worktree? [Y/n]: "
-        read -r confirm
+        ask remove-current "Remove this worktree? [Y/n]: " "nothing was removed"
 
-        if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
+        if [[ ! "$ASK_ANSWER" =~ ^[Nn]$ ]]; then
             echo ""
             remove_worktree "$current_worktree" "$current_branch"
         fi
@@ -796,8 +945,8 @@ main() {
 
     # Prompt for selection
     local selection
-    echo -n "Enter numbers to remove, e.g. 3 7 12-40 (Ctrl+C to cancel): "
-    read -r selection || true
+    ask selection "Enter numbers to remove, e.g. 3 7 12-40 (Ctrl+C to cancel): " "nothing was removed"
+    selection="$ASK_ANSWER"
 
     # Validate the whole selection before removing anything
     local parsed
@@ -813,10 +962,8 @@ main() {
             printf "  %2d) %s\n" $((index + 1)) "${worktree_paths[$index]}"
         done
         echo ""
-        echo -n "Remove these ${#selected_indexes[@]} worktrees? [y/N]: "
-        local confirm=""
-        read -r confirm || true
-        [[ "$confirm" =~ ^[Yy]$ ]] || die "Aborted."
+        ask confirm-selection "Remove these ${#selected_indexes[@]} worktrees? [y/N]: " "nothing was removed"
+        [[ "$ASK_ANSWER" =~ ^[Yy]$ ]] || die "Aborted."
         MULTI_REMOVAL=true
     fi
 
