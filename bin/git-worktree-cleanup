@@ -90,6 +90,11 @@ branch is merged into the main branch: by git history, or by a merged MR/PR into
 the main branch whose head contains the branch tip, with no MR/PR of the branch
 still open. Otherwise it stops before touching anything, unless --force.
 
+A worktree with submodules is removed only when every submodule, recursively, is
+clean (no change, no untracked file, only build/IDE ignored files), has nothing
+in progress, no stash, and its HEAD and local branches are on remote-tracking
+refs; --yes-safe then forces the removal git refuses for submodules.
+
 Removing a worktree shows every MR/PR of its branch (GitLab or GitHub). A
 branch that git history does not show merged is still deleted when one of its
 MRs/PRs into the main branch is merged and the branch has no commit beyond that
@@ -373,17 +378,363 @@ newest_mtime() {
 # a check that fails, returns false so the caller keeps asking (and --yes-safe
 # stops). Callers use it only after a complete keeper listing found no keepers,
 # so every untracked entry is one already shown as deleted with the worktree.
-# Usage: untracked_is_only_obstacle <worktree_path>
+# With "submodules-ok" (only after verify_worktree_submodules passed) the
+# submodules are an accepted obstacle too: then gitlinks are allowed and a status
+# with no entries at all also qualifies, since git refuses because of them alone.
+# Usage: untracked_is_only_obstacle <worktree_path> [submodules-ok]
 untracked_is_only_obstacle() {
-    local wt="$1" status gitlinks line
+    local wt="$1" mode="${2:-}" status gitlinks line
     status=$(git -C "$wt" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none) || return 1
-    [[ -n "$status" ]] || return 1
-    while IFS= read -r line; do
-        [[ "$line" == "?? "* ]] || return 1
-    done <<< "$status"
+    if [[ -n "$status" ]]; then
+        while IFS= read -r line; do
+            [[ "$line" == "?? "* ]] || return 1
+        done <<< "$status"
+    elif [[ "$mode" != submodules-ok ]]; then
+        return 1
+    fi
 
+    [[ "$mode" != submodules-ok ]] || return 0
     gitlinks=$(git -C "$wt" ls-files --stage) || return 1
     ! grep -q '^160000 ' <<< "$gitlinks"
+}
+
+# Print "^<sha>" for every local ref of a repository (remote-tracking refs aside)
+# that one of its remotes has under the same name at the same object: tags and
+# notes fetched from the remote, a branch pushed under its own name. Asks each
+# remote once with `git ls-remote --refs`, limited to VCS_LOOKUP_TIMEOUT seconds
+# (default 10) and never prompting for credentials. Returns non-zero when there is
+# no remote, any remote cannot be asked, or a remote is a local path inside one of
+# the given directories (the worktree and its admin dir): that "remote" is deleted
+# together with the worktree, so it backs nothing.
+# Usage: remote_backed_refs <repo_dir> [doomed_dir...]
+remote_backed_refs() {
+    local repo="$1" remotes remote local_refs listing sha ref
+    shift
+    local -a doomed=()
+    local dir
+    for dir in "$@"; do
+        doomed+=("$(realpath -m -- "$dir")")
+    done
+    remotes=$(git -C "$repo" remote) || return 1
+    [[ -n "$remotes" ]] || return 1
+
+    # Every URL of every remote: a local path (file:// included; not scheme://...
+    # and not scp-like host:path) must not lie inside a directory about to be deleted
+    local urls url local_path
+    while IFS= read -r remote; do
+        [[ -n "$remote" ]] || continue
+        urls=$(git -C "$repo" remote get-url --all "$remote") || return 1
+        while IFS= read -r url; do
+            [[ -n "$url" ]] || continue
+            if [[ "$url" == file://* ]]; then
+                local_path="${url#file://}"
+            elif [[ "$url" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]]; then
+                continue
+            elif [[ "$url" =~ ^[^/]*: ]]; then
+                continue
+            else
+                local_path="$url"
+            fi
+            local_path=$(cd -- "$repo" && realpath -m -- "$local_path") || return 1
+            for dir in "${doomed[@]}"; do
+                if [[ "$local_path" == "$dir" || "$local_path" == "${dir}/"* ]]; then
+                    return 1
+                fi
+            done
+        done <<< "$urls"
+    done <<< "$remotes"
+    local_refs=$(git -C "$repo" for-each-ref --format='%(objectname) %(refname)') || return 1
+
+    local -A local_by_name=()
+    while read -r sha ref; do
+        [[ -n "$ref" && "$ref" != refs/remotes/* ]] || continue
+        local_by_name["$ref"]="$sha"
+    done <<< "$local_refs"
+
+    while IFS= read -r remote; do
+        [[ -n "$remote" ]] || continue
+        listing=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" \
+            timeout "${VCS_LOOKUP_TIMEOUT:-10}" git -C "$repo" ls-remote --refs "$remote" < /dev/null) || return 1
+        while IFS=$'\t' read -r sha ref; do
+            [[ -n "$ref" ]] || continue
+            if [[ "${local_by_name[$ref]:-}" == "$sha" ]]; then
+                printf '^%s\n' "$sha"
+            fi
+        done <<< "$listing"
+    done <<< "$remotes"
+}
+
+# Verify that removing a worktree loses nothing inside its submodules. git refuses
+# a plain `git worktree remove` for any worktree with initialized submodules, and
+# --force deletes their working trees and the git dirs under the worktree's admin
+# dir (<main>/.git/worktrees/<id>/modules/...), so for EVERY initialized submodule,
+# recursively, all of these must hold:
+#   - git status shows nothing: no tracked, staged or conflicted change and no
+#     untracked file (ignored files are allowed only when they are build output or
+#     IDE state per KEEPER_EXCLUDE_*, and contain no nested repository)
+#   - no rebase, merge, cherry-pick, revert or bisect in progress
+#   - no file marked assume-unchanged or skip-worktree
+#   - no commit reachable from any of its refs (branches, tags, notes, stash, HEAD)
+#     is missing from its remote-tracking refs; when some are, the refs its remote
+#     has under the same name at the same object (fetched tags and notes) count as
+#     pushed too (one `git ls-remote` per remote, only then), and whatever is left
+#     is refused by name. A shallow clone whose HEAD cannot be shown pushed this
+#     way is refused as unverifiable
+#   - no stash entries, no linked worktrees of the submodule repo
+#   - its working tree really is this directory (a gitfile pointing elsewhere fails)
+# A gitlink directory that is not a checked-out submodule (foreach skips it) must
+# be absent or empty, and every git dir under the worktree's modules dir must
+# belong to a checked-out submodule (a deinitialized one cannot be verified). Any
+# git or find error fails the check too (fail closed).
+# Sets SUBMODULES_PRESENT (true/false), SUBMODULE_REPORT and SUBMODULE_PROBLEMS
+# (one line each); returns 0 only when there are no problems.
+# Submodule working trees are tracked gitlinks of the worktree, so they never
+# appear in the keeper or discarded lists, and the nested-repository guard (which
+# only searches discarded directories) does not see them; this check covers them.
+# Usage: verify_worktree_submodules <worktree_path>
+SUBMODULES_PRESENT=false
+SUBMODULE_REPORT=""
+SUBMODULE_PROBLEMS=""
+verify_worktree_submodules() {
+    local wt="$1"
+    SUBMODULES_PRESENT=false
+    SUBMODULE_REPORT=""
+    SUBMODULE_PROBLEMS=""
+
+    local index modules_dir wt_git_dir
+    if ! index=$(git -C "$wt" ls-files --stage) \
+        || ! modules_dir=$(git -C "$wt" rev-parse --path-format=absolute --git-path modules) \
+        || ! wt_git_dir=$(git -C "$wt" rev-parse --absolute-git-dir); then
+        SUBMODULES_PRESENT=true
+        SUBMODULE_PROBLEMS="  cannot read the index or the git dir of $wt"
+        return 1
+    fi
+    if ! grep -q '^160000 ' <<< "$index" && [[ ! -e "$modules_dir" ]]; then
+        return 0
+    fi
+    SUBMODULES_PRESENT=true
+
+    local -a problems=() report=()
+    local list_file
+    make_temp_file list_file || { SUBMODULE_PROBLEMS="  cannot create a temp file"; return 1; }
+
+    # Initialized (checked-out) submodules, recursively, relative to the worktree
+    # shellcheck disable=SC2016 # expanded by the shell git submodule foreach runs
+    if ! git -C "$wt" submodule foreach --quiet --recursive 'printf "%s\0" "$displaypath"' > "$list_file"; then
+        SUBMODULE_PROBLEMS="  cannot list the submodules of $wt (git submodule foreach failed)"
+        return 1
+    fi
+    local -a subs=()
+    mapfile -d '' -t subs < "$list_file"
+
+    local exclude_re
+    exclude_re=$(_keeper_exclude_regex)
+
+    local backed_file
+    make_temp_file backed_file || { SUBMODULE_PROBLEMS="  cannot create a temp file"; return 1; }
+
+    local -a sub_git_dirs=()
+    local sp sub git_dir status state state_path head_ref="" stash entry found
+    for sp in "${subs[@]}"; do
+        sub="${wt}/${sp}"
+        if ! git_dir=$(git -C "$sub" rev-parse --absolute-git-dir); then
+            problems+=("  ${sp}: cannot resolve its git dir")
+            continue
+        fi
+        sub_git_dirs+=("$git_dir")
+
+        # The repo must have this directory as its working tree, or the checks below
+        # would verify some other tree than the one --force deletes
+        local top=""
+        if ! top=$(git -C "$sub" rev-parse --show-toplevel) \
+            || [[ "$(realpath -e -- "$top")" != "$(realpath -e -- "$sub")" ]]; then
+            problems+=("  ${sp}: its git dir has a different working tree (${top:-?}); cannot verify it")
+            continue
+        fi
+
+        local flagged=""
+        if ! flagged=$(git -C "$sub" ls-files -v); then
+            problems+=("  ${sp}: cannot check for assume-unchanged or skip-worktree files")
+        elif flagged=$(awk '/^S / { print "skip-worktree " substr($0, 3) } /^[a-z] / { print "assume-unchanged " substr($0, 3) }' <<< "$flagged") && [[ -n "$flagged" ]]; then
+            problems+=("  ${sp}: files git ignores changes of: $(head -n 3 <<< "$flagged" | tr '\n' ';')")
+        fi
+
+        local sub_worktrees=""
+        if ! sub_worktrees=$(git -C "$sub" worktree list --porcelain); then
+            problems+=("  ${sp}: cannot list its linked worktrees")
+        elif [[ "$(grep -c '^worktree ' <<< "$sub_worktrees")" -gt 1 ]]; then
+            problems+=("  ${sp}: the submodule repo has linked worktrees of its own (git -C $(printf '%q' "$sub") worktree prune, if they are stale)")
+        fi
+
+        if ! status=$(git -C "$sub" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none); then
+            problems+=("  ${sp}: cannot read git status")
+        elif [[ -n "$status" ]]; then
+            problems+=("  ${sp}: has changes or untracked files: $(head -n 3 <<< "$status" | tr '\n' ';')")
+        fi
+
+        for state in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+            if ! state_path=$(git -C "$sub" rev-parse --path-format=absolute --git-path "$state"); then
+                problems+=("  ${sp}: cannot check for an operation in progress")
+                break
+            fi
+            [[ ! -e "$state_path" ]] || problems+=("  ${sp}: operation in progress: ${state}")
+        done
+
+        # Ignored content must be build output or IDE state, with no repository inside
+        if ! git -C "$sub" ls-files -z --others --ignored --exclude-standard --directory > "$list_file"; then
+            problems+=("  ${sp}: cannot list its ignored files")
+        else
+            local -a ignored=()
+            mapfile -d '' -t ignored < "$list_file"
+            for entry in "${ignored[@]}"; do
+                if [[ ! "$entry" =~ $exclude_re ]]; then
+                    problems+=("  ${sp}: ignored file that is not build output or IDE state: ${entry}")
+                elif [[ "$entry" == */ && -d "${sub}/${entry}" && ! -L "${sub}/${entry%/}" ]]; then
+                    if ! found=$(find -P "${sub}/${entry%/}" -name .git -prune -print -quit); then
+                        problems+=("  ${sp}: cannot search ${entry} for nested repositories")
+                    elif [[ -n "$found" ]]; then
+                        problems+=("  ${sp}: ${entry} contains a git repository: ${found}")
+                    fi
+                fi
+            done
+        fi
+
+        # Pushed state: every commit reachable from its refs and HEAD must be on a
+        # remote-tracking ref, or on a ref the remote has by the same name at the same
+        # object (the remote is asked only when the first, offline count is not 0)
+        : > "$backed_file"
+        local unpushed=""
+        if ! unpushed=$(git -C "$sub" rev-list --count --all --not --remotes); then
+            problems+=("  ${sp}: cannot count commits missing from its remote-tracking refs")
+            unpushed=""
+        elif [[ "$unpushed" != 0 ]]; then
+            if ! remote_backed_refs "$sub" "$wt" "$wt_git_dir" > "$backed_file"; then
+                problems+=("  ${sp}: ${unpushed} commits are on no remote-tracking ref and its remote could not be asked which refs it has (or is a path inside the worktree being removed); cannot verify them")
+                unpushed=""
+            elif ! unpushed=$(git -C "$sub" rev-list --count --all --not --remotes --stdin < "$backed_file"); then
+                problems+=("  ${sp}: cannot count commits missing from its remote")
+                unpushed=""
+            fi
+        fi
+        if [[ -n "$unpushed" && "$unpushed" != 0 ]]; then
+            # Name what is left: HEAD and every local ref with commits the remote lacks
+            local -a culprits=()
+            local -A backed_shas=()
+            local backed_line ref_sha ref_name ref_unpushed
+            while IFS= read -r backed_line; do
+                [[ -z "$backed_line" ]] || backed_shas["${backed_line#^}"]=1
+            done < "$backed_file"
+            local local_refs=""
+            if ! local_refs=$( { echo "$(git -C "$sub" rev-parse HEAD) HEAD"; git -C "$sub" for-each-ref --format='%(objectname) %(refname)'; } ); then
+                problems+=("  ${sp}: ${unpushed} commits reachable from its refs are not on its remote, and its refs cannot be listed")
+            else
+                while read -r ref_sha ref_name; do
+                    [[ -n "$ref_name" && "$ref_name" != refs/remotes/* ]] || continue
+                    [[ -z "${backed_shas[$ref_sha]:-}" ]] || continue
+                    if ! ref_unpushed=$(git -C "$sub" rev-list --count "$ref_sha" --not --remotes --stdin < "$backed_file"); then
+                        culprits+=("${ref_name} (cannot check)")
+                    elif [[ "$ref_unpushed" != 0 ]]; then
+                        culprits+=("${ref_name#refs/} (${ref_unpushed})")
+                    fi
+                done <<< "$local_refs"
+                local named
+                named=$(printf '%s, ' "${culprits[@]:0:10}")
+                named="${named%, }"
+                [[ ${#culprits[@]} -le 10 ]] || named="${named}, … $(( ${#culprits[@]} - 10 )) more"
+                if [[ -e "${git_dir}/shallow" ]]; then
+                    problems+=("  ${sp}: shallow clone, cannot verify locally that its commits are on the remote: ${named:-?}")
+                else
+                    problems+=("  ${sp}: ${unpushed} commits are on no remote-tracking ref and on no ref its remote has (unpushed work): ${named:-?}")
+                fi
+            fi
+            unset backed_shas
+        fi
+
+        local containing=""
+        if containing=$(git -C "$sub" for-each-ref --contains HEAD --format='%(refname:short)' refs/remotes) && [[ -n "$containing" ]]; then
+            head_ref=$(head -n 1 <<< "$containing")
+        elif [[ "$unpushed" == 0 ]]; then
+            head_ref="a ref its remote has"
+        fi
+
+        if ! stash=$(git -C "$sub" stash list); then
+            problems+=("  ${sp}: cannot read its stash")
+        elif [[ -n "$stash" ]]; then
+            problems+=("  ${sp}: has $(grep -c '' <<< "$stash") stash entries")
+        fi
+
+        report+=("  ${sp}: clean, HEAD on ${head_ref:-?}, git dir ${git_dir}")
+        head_ref=""
+    done
+
+    # A gitlink directory foreach did not visit (not a checked-out submodule, e.g. its
+    # gitfile is gone) must be absent or empty: --force would delete its content
+    # unverified. Checked for the worktree and, recursively, for each submodule.
+    local -A visited=()
+    for sp in "${subs[@]}"; do
+        visited["$sp"]=1
+    done
+    local repo_prefix repo_dir line gitlink content
+    for repo_prefix in "" "${subs[@]}"; do
+        repo_dir="$wt"
+        [[ -z "$repo_prefix" ]] || repo_dir="${wt}/${repo_prefix}"
+        if ! git -C "$repo_dir" ls-files -z --stage > "$list_file"; then
+            problems+=("  ${repo_prefix:-.}: cannot read its index")
+            continue
+        fi
+        while IFS= read -r -d '' line; do
+            [[ "$line" == "160000 "* ]] || continue
+            gitlink="${line#*$'\t'}"
+            [[ -z "$repo_prefix" ]] || gitlink="${repo_prefix}/${gitlink}"
+            [[ -z "${visited[$gitlink]:-}" ]] || continue
+            [[ -e "${wt}/${gitlink}" || -L "${wt}/${gitlink}" ]] || continue
+            if [[ ! -d "${wt}/${gitlink}" || -L "${wt}/${gitlink}" ]]; then
+                problems+=("  ${gitlink}: gitlink path is not a directory")
+            elif ! content=$(find -P "${wt}/${gitlink}" -mindepth 1 -print -quit); then
+                problems+=("  ${gitlink}: cannot check whether it is empty")
+            elif [[ -n "$content" ]]; then
+                problems+=("  ${gitlink}: has content but is not a checked-out submodule; cannot verify it")
+            fi
+        done < "$list_file"
+    done
+
+    # Submodule git dirs under the worktree's modules dir that no checked-out
+    # submodule uses (deinitialized ones) would be deleted unverified
+    if [[ -e "$modules_dir" ]]; then
+        # Every git dir has an objects dir, also a half-deleted one without HEAD
+        # No -prune: a submodule path component named "objects" must not hide a git dir
+        # below it; the sibling filter below drops object stores and their subdirs.
+        # -mindepth 2: $modules_dir itself is never a submodule git dir
+        if ! find -P "$modules_dir" -mindepth 2 -name objects -type d -printf '%h\0' > "$list_file"; then
+            problems+=("  cannot search ${modules_dir} for submodule git dirs")
+        else
+            local -a module_dirs=()
+            mapfile -d '' -t module_dirs < "$list_file"
+            local module_dir known resolved
+            for module_dir in "${module_dirs[@]}"; do
+                # A git dir has refs, HEAD or config next to objects; lfs/objects and
+                # annex/objects inside a submodule git dir are object stores, not git dirs
+                [[ -d "${module_dir}/refs" || -e "${module_dir}/HEAD" || -e "${module_dir}/config" ]] || continue
+                resolved=$(realpath -e -- "$module_dir") || { problems+=("  cannot resolve ${module_dir}"); continue; }
+                local known_dir=false
+                for known in "${sub_git_dirs[@]}"; do
+                    [[ "$(realpath -m -- "$known")" != "$resolved" ]] || { known_dir=true; break; }
+                done
+                [[ "$known_dir" == true ]] || problems+=("  submodule git dir without a checked-out submodule, cannot verify it: ${module_dir}")
+            done
+        fi
+    fi
+
+    if [[ ${#report[@]} -gt 0 ]]; then
+        SUBMODULE_REPORT=$(printf '%s\n' "${report[@]}")
+    else
+        SUBMODULE_REPORT="  no checked-out submodule, nothing in the modules dir to lose"
+    fi
+    if [[ ${#problems[@]} -gt 0 ]]; then
+        SUBMODULE_PROBLEMS=$(printf '%s\n' "${problems[@]}")
+        return 1
+    fi
+    return 0
 }
 
 # Set WORKTREE_LOCKED to true or false for a worktree (paths compared resolved).
@@ -632,6 +983,25 @@ remove_worktree() {
     # Locked or partly undeletable: git would refuse late or stop halfway
     require_fully_removable "$selected_path"
 
+    # Submodules: a forced removal deletes their working trees and git dirs, so it is
+    # only allowed when nothing in them would be lost (see verify_worktree_submodules)
+    local submodules_verified=false
+    if verify_worktree_submodules "$selected_path"; then
+        if [[ "$SUBMODULES_PRESENT" == true ]]; then
+            submodules_verified=true
+            echo "submodules verified safe:"
+            echo "$SUBMODULE_REPORT"
+        fi
+    else
+        warn "Its submodules hold state a forced removal would lose, or could not be checked:"
+        echo "$SUBMODULE_PROBLEMS"
+        if [[ "$ASSUME_YES" == true ]]; then
+            die "--yes-safe never removes unverified submodules; this worktree was not removed"
+        fi
+        ask discard-submodules "Remove it anyway, losing that submodule state? [y/N]: " "this worktree was not removed"
+        [[ "$ASK_ANSWER" =~ ^[Yy]$ ]] || die "Aborted; this worktree was not removed."
+    fi
+
     # A list that could not be completed must never decide what survives a forced removal
     local keepers_file discarded_file
     make_temp_file keepers_file || die "Failed to create a temp file"
@@ -762,10 +1132,15 @@ remove_worktree() {
         # to and nothing unsaved was found (not merely confirmed), removing it is keep
         # mode with nothing to keep, so it is forced instead of stopping at the prompt.
         # Interactively the force-remove question is still asked.
+        # The same holds for a worktree whose submodules were verified safe above:
+        # git refuses it only because of them, and the force loses nothing.
         local only_discarded=false
-        if [[ "$ASSUME_YES" == true ]] && [[ ${#keepers[@]} -eq 0 ]] && [[ -z "$unsaved" ]] \
-            && untracked_is_only_obstacle "$selected_path"; then
-            only_discarded=true
+        if [[ "$ASSUME_YES" == true ]] && [[ ${#keepers[@]} -eq 0 ]] && [[ -z "$unsaved" ]]; then
+            if untracked_is_only_obstacle "$selected_path"; then
+                only_discarded=true
+            elif [[ "$submodules_verified" == true ]] && untracked_is_only_obstacle "$selected_path" submodules-ok; then
+                only_discarded=true
+            fi
         fi
 
         # Remove the worktree, offering --force if it has modifications
@@ -801,6 +1176,10 @@ remove_worktree() {
             # in a plain removal instead of refusing
             elif ! remove_error=$(git -c status.showUntrackedFiles=normal worktree remove "$selected_path" 2>&1); then
                 warn "git worktree remove refused: ${remove_error}"
+                if [[ "$submodules_verified" == true ]]; then
+                    echo "submodules verified safe:"
+                    echo "$SUBMODULE_REPORT"
+                fi
                 ask force-remove "Force remove? [y/N]: " "this worktree was not removed"
                 if [[ "$ASK_ANSWER" =~ ^[Yy]$ ]]; then
                     # git worktree remove --force does not stop at mount points
