@@ -259,7 +259,7 @@ remove_worktree_keeping_files() {
 
     local tmp manifest
     tmp=$(mktemp -d "$(dirname "$wt")/.worktree-keep.XXXXXX") || die "Failed to create a temp dir next to $wt; nothing was removed"
-    manifest=$(mktemp) || die "Failed to create a temp file; nothing was removed. Copy dir (empty): $tmp"
+    make_temp_file manifest || die "Failed to create a temp file; nothing was removed. Copy dir (empty): $tmp"
 
     if ! (cd "$wt" && printf '%s\0' "$@" | xargs -0 -r cp -al --parents -t "$tmp" --); then
         die "Hard-linking the kept files failed; the worktree was not removed. Files owned by another user cannot be hard-linked (fs.protected_hardlinks), nor can files on another file system. Partial copy: $tmp"
@@ -413,7 +413,7 @@ require_fully_removable() {
 
     [[ -w "$(dirname "$wt")" && -x "$(dirname "$wt")" ]] || die "$(dirname "$wt") is not writable, so $wt cannot be deleted; this worktree was not removed"
 
-    blocked_file=$(mktemp) || die "Failed to create a temp file; this worktree was not removed"
+    make_temp_file blocked_file || die "Failed to create a temp file; this worktree was not removed"
     # Relative to the worktree, so its own .git file is pruned by a literal path,
     # never by a pattern built from the worktree path
     local find_ok=true
@@ -598,8 +598,8 @@ remove_worktree() {
 
     # A list that could not be completed must never decide what survives a forced removal
     local keepers_file discarded_file
-    keepers_file=$(mktemp) || die "Failed to create a temp file"
-    discarded_file=$(mktemp) || die "Failed to create a temp file"
+    make_temp_file keepers_file || die "Failed to create a temp file"
+    make_temp_file discarded_file || die "Failed to create a temp file"
     if ! list_worktree_keeper_files "$selected_path" "$main_worktree" "$discarded_file" > "$keepers_file"; then
         die "Could not list all unversioned files of $selected_path (see above); nothing was removed"
     fi
@@ -641,7 +641,7 @@ remove_worktree() {
         # Fails closed: a directory that cannot be fully searched stops the run.
         local -a nested_repos=() found=()
         local found_file
-        found_file=$(mktemp) || die "Failed to create a temp file; this worktree was not removed"
+        make_temp_file found_file || die "Failed to create a temp file; this worktree was not removed"
         for entry in "${search_dirs[@]}"; do
             if ! find -P "${selected_path}/${entry}" -name .git -prune -printf '%h\0' > "$found_file"; then
                 rm -f -- "$found_file"
@@ -707,7 +707,7 @@ remove_worktree() {
         # Files that appeared or vanished while the prompts waited would not be kept;
         # list again right before the copy and stop if the set changed
         local relisted_file
-        relisted_file=$(mktemp) || die "Failed to create a temp file"
+        make_temp_file relisted_file || die "Failed to create a temp file"
         if ! list_worktree_keeper_files "$selected_path" "$main_worktree" > "$relisted_file"; then
             die "Could not list all unversioned files of $selected_path again (see above); nothing was removed"
         fi
@@ -743,7 +743,7 @@ remove_worktree() {
             if [[ "$only_discarded" == true ]]; then
                 # A keeper written since the listing would be deleted by the force
                 local relisted_none
-                relisted_none=$(mktemp) || die "Failed to create a temp file"
+                make_temp_file relisted_none || die "Failed to create a temp file"
                 if ! list_worktree_keeper_files "$selected_path" "$main_worktree" > "$relisted_none"; then
                     rm -f -- "$relisted_none"
                     die "Could not list all unversioned files of $selected_path again (see above); nothing was removed"
@@ -1140,14 +1140,15 @@ main() {
     # Precompute mainline commits for bulk merged-with-changes detection
     local main_branch
     main_branch=$(get_main_branch)
-    _mainline_file=$(mktemp)
+    local _mainline_file
+    make_temp_file _mainline_file || die "Failed to create a temp file"
     get_mainline_commits "$main_branch" > "$_mainline_file"
-    trap 'rm -f "$_mainline_file" "${_session_index_file:-}"' EXIT
 
     # Signals: unversioned keeper files (scanned in parallel) and Claude sessions per path
     local -A keep_counts=() keep_newest=() keep_discarded=()
     if [[ "$show_signals" == true ]]; then
-        _session_index_file=$(mktemp)
+        local _session_index_file
+        make_temp_file _session_index_file || die "Failed to create a temp file"
         build_claude_session_index > "$_session_index_file"
         local summary_path summary_count summary_newest summary_discarded
         while IFS=$'\t' read -r summary_path summary_count summary_newest summary_discarded; do

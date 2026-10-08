@@ -166,6 +166,40 @@ mutate() {
 }
 
 #
+# Temp files
+#
+
+# Temp files made with make_temp_file and the (sub)shell that owns each. Every
+# (sub)shell removes its own on exit, whatever the exit path (die, Ctrl+C, error).
+# Temp dirs that hold kept files (.worktree-keep.*, .worktree-restore.*) are made
+# with mktemp -d directly and never registered: they must survive a failure.
+_TEMP_FILES=()
+_TEMP_FILE_OWNERS=()
+
+_remove_own_temp_files() {
+    local i
+    for i in "${!_TEMP_FILES[@]}"; do
+        if [[ "${_TEMP_FILE_OWNERS[$i]}" == "$BASHPID" ]]; then
+            rm -f -- "${_TEMP_FILES[$i]}"
+        fi
+    done
+    return 0
+}
+
+# Create a temp file, register it for removal on exit, and store its path in the
+# named variable. Call it directly, never inside $(...): the file belongs to the
+# shell that registers it, and a command substitution would remove it at once.
+# Usage: make_temp_file <variable_name>
+make_temp_file() {
+    local __make_temp_file_path
+    __make_temp_file_path=$(mktemp) || return 1
+    _TEMP_FILES+=("$__make_temp_file_path")
+    _TEMP_FILE_OWNERS+=("$BASHPID")
+    trap _remove_own_temp_files EXIT
+    printf -v "$1" '%s' "$__make_temp_file_path"
+}
+
+#
 # Git repository checks
 #
 
@@ -887,9 +921,9 @@ list_worktree_keeper_files() {
     unset 'prune_args[${#prune_args[@]}-1]'
 
     local raw_file expanded_file candidates_file
-    raw_file=$(mktemp) || return 1
-    expanded_file=$(mktemp) || { rm -f -- "$raw_file"; return 1; }
-    candidates_file=$(mktemp) || { rm -f -- "$raw_file" "$expanded_file"; return 1; }
+    make_temp_file raw_file || return 1
+    make_temp_file expanded_file || { rm -f -- "$raw_file"; return 1; }
+    make_temp_file candidates_file || { rm -f -- "$raw_file" "$expanded_file"; return 1; }
 
     local failed=0
     if ! git -C "$worktree_path" ls-files -z --others --exclude-standard > "$raw_file" \
@@ -956,8 +990,8 @@ worktree_keeper_summary() {
     local worktree_path="$1"
     local main_root="${2:-}"
     local list_file discarded_file discarded_count summary
-    list_file=$(mktemp) || { echo "? 0 0"; return 0; }
-    discarded_file=$(mktemp) || { rm -f -- "$list_file"; echo "? 0 0"; return 0; }
+    make_temp_file list_file || { echo "? 0 0"; return 0; }
+    make_temp_file discarded_file || { rm -f -- "$list_file"; echo "? 0 0"; return 0; }
     if ! list_worktree_keeper_files "$worktree_path" "$main_root" "$discarded_file" > "$list_file" 2>/dev/null; then
         rm -f -- "$list_file" "$discarded_file"
         echo "? 0 0"
@@ -1089,7 +1123,7 @@ _dest_stays_inside() {
 _move_tree_into() {
     local src="$1" dst="$2" skip="${3:-}"
     local list rel rc=0
-    list=$(mktemp) || return 1
+    make_temp_file list || return 1
     if ! (cd -- "$src" && find . -mindepth 1 \( -type f -o -type l \) -printf '%P\0') > "$list"; then
         warn "Cannot list everything in $src"
         rm -f -- "$list"
@@ -1145,7 +1179,7 @@ stash_archived_worktree_dir() {
     local dir="$1"
     local tmp before
     tmp=$(mktemp -d "$(dirname "$dir")/.worktree-restore.XXXXXX") || die "Failed to create a temp dir next to $dir"
-    before=$(mktemp) || die "Failed to create a temp file"
+    make_temp_file before || die "Failed to create a temp file"
     _manifest_of_tree "$dir" > "$before" || die "Cannot list the archived files in $dir; nothing was moved"
 
     _move_tree_into "$dir" "$tmp" "$WORKTREE_ARCHIVED_MARKER" \
@@ -1171,7 +1205,7 @@ unstash_archived_worktree_dir() {
     else
         mkdir -p -- "$dir" || return 1
     fi
-    before=$(mktemp) || return 1
+    make_temp_file before || return 1
     _manifest_of_tree "$tmp" > "$before" || return 1
     if ! mv -n -- "${tmp}/${WORKTREE_ARCHIVED_MARKER}" "${dir}/${WORKTREE_ARCHIVED_MARKER}" || [[ -e "${tmp}/${WORKTREE_ARCHIVED_MARKER}" ]]; then
         return 1
@@ -1193,8 +1227,8 @@ unstash_archived_worktree_dir() {
 restore_archived_worktree_files() {
     local tmp="$1" worktree_path="$2" git_root="$3"
     local expected list
-    expected=$(mktemp) || die "Failed to create a temp file; archived files are in $tmp"
-    list=$(mktemp) || die "Failed to create a temp file; archived files are in $tmp"
+    make_temp_file expected || die "Failed to create a temp file; archived files are in $tmp"
+    make_temp_file list || die "Failed to create a temp file; archived files are in $tmp"
     (cd -- "$tmp" && find . -mindepth 1 \( -type f -o -type l \) -printf '%P\0') > "$list" \
         || die "Cannot list the archived files in $tmp; nothing was restored"
 
