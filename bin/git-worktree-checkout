@@ -14,6 +14,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 source "${SCRIPT_DIR}/lib/terminals.sh"
 
+# Run as a git alias from inside a worktree, git exports GIT_DIR pointing at that
+# worktree's admin dir (.git/worktrees/<id>). It would override repository discovery
+# in `git -C <new worktree>` calls (e.g. warmup reading the wrong index). git already
+# chdir'd to the worktree's top level, so discovery finds the same repo without it.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+
 show_help() {
     cat << 'EOF'
 Usage: git wt [options] <branch>
