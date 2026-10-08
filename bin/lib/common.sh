@@ -1005,7 +1005,8 @@ worktree_keeper_summary() {
 }
 
 # Claude Code project directory name for a path: every non-alphanumeric char
-# becomes '-'; names over 200 chars are cut to 200 and get a '-<hash>' suffix
+# becomes '-'. Claude Code itself cuts names over 200 chars to 200 and appends
+# '-<hash>'; this function does not, callers match such names by their prefix.
 # Usage: claude_project_slug <dir_path>
 claude_project_slug() {
     local path="$1"
@@ -1056,6 +1057,83 @@ claude_sessions_for_path() {
     else
         awk -F'\t' -v prefix="${slug:0:200}-" 'index($1, prefix) == 1 { n += $2; if ($3 > t) t = $3 } END { print n + 0, t + 0 }' "$index_file"
     fi
+}
+
+# Print the newest Claude session activity in a directory or any of its
+# subdirectories as epoch seconds (0 when there was none). Looks at every Claude
+# projects dir (default, $CLAUDE_CONFIG_DIR, auth-switch profiles) for project dirs
+# named like the path's slug or the slug of a path below it ("<slug>-*", which may
+# also catch a sibling whose name starts the same: stricter, never laxer), and
+# names over 200 chars by their prefix. Every *.jsonl below them counts, sub-agent
+# transcripts included: the last "timestamp" in its tail, because file mtimes run
+# later than the real activity, or its mtime when it has none. Returns non-zero
+# when anything cannot be read or searched (a Claude config dir, a projects dir, a
+# project dir, a transcript); callers must treat that as recent activity.
+# Usage: claude_last_activity_for_path <dir_path>
+claude_last_activity_for_path() {
+    local slug root projects_dir project transcript ts epoch newest=0
+
+    # An existing but unreadable Claude config dir would hide its sessions
+    local -a roots=("${HOME}/.claude" "${HOME}/.claude/projects")
+    [[ -z "${CLAUDE_CONFIG_DIR:-}" ]] || roots+=("$CLAUDE_CONFIG_DIR" "${CLAUDE_CONFIG_DIR}/projects")
+    if [[ -e "${HOME}/.claude-profiles" || -L "${HOME}/.claude-profiles" ]]; then
+        roots+=("${HOME}/.claude-profiles")
+        [[ -r "${HOME}/.claude-profiles" && -x "${HOME}/.claude-profiles" ]] || return 1
+        for root in "${HOME}"/.claude-profiles/*/ "${HOME}"/.claude-profiles/*/projects; do
+            roots+=("$root")
+        done
+    fi
+    for root in "${roots[@]}"; do
+        [[ -e "$root" || -L "$root" ]] || continue
+        [[ -d "$root" && -r "$root" && -x "$root" ]] || return 1
+    done
+
+    slug=$(claude_project_slug "$1")
+    local -a project_dirs=()
+    while IFS= read -r projects_dir; do
+        [[ -n "$projects_dir" ]] || continue
+        [[ -r "$projects_dir" && -x "$projects_dir" ]] || return 1
+        if [[ ${#slug} -le 200 ]]; then
+            for project in "${projects_dir}/${slug}" "${projects_dir}/${slug}-"*; do
+                if [[ -e "$project" || -L "$project" ]]; then
+                    project_dirs+=("$project")
+                fi
+            done
+        else
+            for project in "${projects_dir}/${slug:0:200}"-*; do
+                if [[ -e "$project" || -L "$project" ]]; then
+                    project_dirs+=("$project")
+                fi
+            done
+        fi
+    done < <(_claude_projects_dirs)
+
+    local transcripts_file
+    make_temp_file transcripts_file || return 1
+    local -a transcripts=()
+    for project in "${project_dirs[@]}"; do
+        [[ -d "$project" && -r "$project" && -x "$project" ]] || return 1
+        # Every transcript below the project dir, sub-agent ones included; a dir that
+        # cannot be searched fails the lookup
+        find -P "$project" -name '*.jsonl' \( -type f -o -type l \) -print0 > "$transcripts_file" || return 1
+        mapfile -d '' -t transcripts < "$transcripts_file"
+        for transcript in "${transcripts[@]}"; do
+            [[ -e "$transcript" ]] || continue
+            [[ -f "$transcript" && -r "$transcript" ]] || return 1
+            ts=$(tail -c 65536 -- "$transcript" | grep -a -o '"timestamp":"[^"]*"' | tail -n 1 | cut -d'"' -f4) || ts=""
+            epoch=""
+            if [[ -n "$ts" ]]; then
+                epoch=$(date -d "$ts" +%s 2>/dev/null) || epoch=""
+            fi
+            if [[ ! "$epoch" =~ ^[0-9]+$ ]]; then
+                epoch=$(stat -c '%Y' -- "$transcript") || return 1
+            fi
+            if (( epoch > newest )); then
+                newest=$epoch
+            fi
+        done
+    done
+    echo "$newest"
 }
 
 #

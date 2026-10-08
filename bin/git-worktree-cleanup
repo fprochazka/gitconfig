@@ -31,6 +31,9 @@ KEEP_FILES_FOR_ALL=false
 # Kept files written this recently make the removal ask once more: a session may still be running there
 RECENT_WRITE_SECONDS=600
 
+# A worktree with Claude session activity this recent is never removed by --yes-safe
+RECENT_SESSION_SECONDS=86400
+
 # How many lines of the kept-files listing to print after a keep-in-place removal
 KEPT_LISTING_LINES=200
 
@@ -111,7 +114,9 @@ Options:
                         branch, skip orphaned directories. Every safety question
                         (unsaved changes, recently written files, git refusing a
                         plain removal, ...) stops the run instead. Only inside a
-                        linked worktree; combines with --dry-run and --force
+                        linked worktree; combines with --dry-run and --force.
+                        Refuses a worktree with Claude session activity in the
+                        last 24 hours (--force does not override that)
     --force             Clean up the current worktree although its branch is not
                         merged (see below); the branch is kept. Overrides only
                         that refusal: unsaved changes, recently written files,
@@ -568,6 +573,37 @@ require_merged_or_force() {
         return 0
     fi
     die "Branch '${branch}' is not merged: ${why}. Nothing was removed. Run again with --force to remove the worktree anyway (the branch is kept; every other safety check still applies)."
+}
+
+# A Claude session may still be working in the worktree: under --yes-safe die
+# before anything is touched when one was active within RECENT_SESSION_SECONDS
+# (or when that cannot be determined); interactively only warn, the user decides.
+# --force does not override it.
+# Usage: check_recent_session_activity <worktree_path>
+check_recent_session_activity() {
+    local wt="$1" last age when=""
+    if last=$(claude_last_activity_for_path "$wt"); then
+        [[ "$last" -gt 0 ]] || return 0
+        age=$(( $(date +%s) - last ))
+        # A timestamp in the future (clock skew) counts as just now
+        if (( age < 0 )); then
+            age=0
+        fi
+        [[ "$age" -lt "$RECENT_SESSION_SECONDS" ]] || return 0
+        if [[ "$age" -lt 3600 ]]; then
+            when="$(( age / 60 )) min ago"
+        else
+            when="$(( age / 3600 )) h ago"
+        fi
+        when="${when}, $(date -d "@${last}" '+%F %H:%M')"
+    else
+        when="unknown, the session lookup failed"
+    fi
+
+    if [[ "$ASSUME_YES" == true ]]; then
+        die "Claude session activity in this worktree ${when}; this worktree was not removed. Run without --yes-safe to decide interactively."
+    fi
+    warn "Claude session activity in this worktree ${when}; a session may still be working here."
 }
 
 # Remove a worktree and optionally its branch. When the worktree has keeper
@@ -1065,6 +1101,7 @@ main() {
         echo -e "  ${COLOR_BOLD}${current_worktree}${COLOR_RESET}"
         show_branch_mr_status "$current_branch"
         require_merged_or_force "$current_branch"
+        check_recent_session_activity "$current_worktree"
         echo ""
     fi
 
