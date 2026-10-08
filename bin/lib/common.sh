@@ -871,7 +871,7 @@ readonly WORKTREE_ARCHIVED_MARKER=".worktree-archived"
 # Unversioned paths that are build output or IDE state, never worth keeping.
 # Directory names match at any depth, suffixes match the end of file names.
 readonly KEEPER_EXCLUDE_DIRS=(.worktrees build .gradle .kotlin out target node_modules .next .nx dist coverage .venv __pycache__ .pytest_cache .ruff_cache .mypy_cache .idea .settings)
-readonly KEEPER_EXCLUDE_SUFFIXES=(.class .tsbuildinfo .project .classpath .factorypath .flattened-pom.xml)
+readonly KEEPER_EXCLUDE_SUFFIXES=(.class .iml .tsbuildinfo .project .classpath .factorypath .flattened-pom.xml)
 
 # ERE matching relative paths excluded from keeper files
 _keeper_exclude_regex() {
