@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "fprochazka-gitconfig",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Skills for working inside Filip Procházka's gitconfig: worktrees and ticket branches through git wt, git issue-branch and git wt-cleanup, the git config defaults that break usual commands, and git libs-clone for reading third-party sources",
   "author": {
     "name": "Filip Procházka",
@@ -9,5 +9,6 @@
   },
   "homepage": "https://github.com/fprochazka/gitconfig",
   "repository": "https://github.com/fprochazka/gitconfig",
+  "license": "MIT",
   "keywords": ["git", "gitconfig", "worktree", "linear"]
 }
