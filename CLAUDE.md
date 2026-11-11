@@ -16,6 +16,11 @@
 │   ├── commands.gitconfig  # Aliases for bin/git-* commands
 │   ├── aliases.gitconfig   # Short aliases (co, ci, st, etc.)
 │   └── *.gitconfig         # Other config modules (colors, diff, rebase, etc.)
+├── .claude-plugin/
+│   └── marketplace.json    # Claude Code marketplace with the one plugin below
+├── coding-agent-plugins/claude-code/
+│   ├── .claude-plugin/plugin.json  # Plugin manifest, same version as the marketplace entry
+│   └── skills/*/SKILL.md   # Skills that teach an agent the commands and config of this repo
 ├── Makefile                # Lint and test commands
 └── README.md               # User-facing documentation
 ```
@@ -75,6 +80,9 @@ When making changes, ensure these stay consistent:
 | Rename/remove command | `config/commands.gitconfig`, `README.md` |
 | Change command options | `usage()` in script, `README.md` |
 | New library file | Document sourcing pattern in this file |
+| Change behavior or options of `git wt`, `git wt-cleanup`, `git issue-branch`, `git libs-clone` | The skill in `coding-agent-plugins/claude-code/skills/` that teaches it |
+| Change a config default listed in the `git-config-traps` skill | That skill |
+| Any change to `coding-agent-plugins/` | Bump `version` in `plugin.json` and the `.claude-plugin/marketplace.json` entry together; installed plugins update only when it changes |
 
 ## Code Conventions
 

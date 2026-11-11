@@ -1,0 +1,21 @@
+{
+  "name": "fprochazka-gitconfig",
+  "description": "Filip Procházka's opinionated gitconfig, with skills that teach a coding agent its commands and the defaults it changes",
+  "owner": {
+    "name": "Filip Procházka"
+  },
+  "plugins": [
+    {
+      "name": "fprochazka-gitconfig",
+      "description": "Skills for working inside Filip Procházka's gitconfig: worktrees and ticket branches through git wt, git issue-branch and git wt-cleanup, the git config defaults that break usual commands, and git libs-clone for reading third-party sources",
+      "version": "0.1.0",
+      "author": {
+        "name": "Filip Procházka",
+        "url": "https://github.com/fprochazka"
+      },
+      "source": "./coding-agent-plugins/claude-code",
+      "category": "productivity",
+      "homepage": "https://github.com/fprochazka/gitconfig"
+    }
+  ]
+}

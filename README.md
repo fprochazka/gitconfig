@@ -50,6 +50,17 @@ Per-company configuration works via `includeIf`:
     linearToken = lin_api_company_token
 ```
 
+### Claude Code plugin
+
+The repository is also a Claude Code plugin marketplace with one plugin, `fprochazka-gitconfig`. Its skills teach a coding agent the worktree and ticket-branch commands, the defaults of this gitconfig that break usual git commands, and `git libs-clone`:
+
+```bash
+claude plugin marketplace add fprochazka/gitconfig --scope user
+claude plugin install fprochazka-gitconfig@fprochazka-gitconfig --scope user
+```
+
+See [its README](coding-agent-plugins/claude-code/README.md).
+
 ## Custom Git Commands
 
 This gitconfig provides many custom git commands and aliases for enhanced productivity:

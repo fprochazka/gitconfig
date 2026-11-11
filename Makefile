@@ -1,4 +1,4 @@
-.PHONY: lint lint-all check test test-help help
+.PHONY: lint lint-all check test test-help test-plugin help
 
 SHELL := /bin/bash
 SCRIPTS := $(shell find bin -type f -name 'git-*' -executable) $(wildcard bin/lib/*.sh)
@@ -31,3 +31,11 @@ test-help: ## Verify all scripts respond to --help
 		fi; \
 	done
 	@echo "All scripts respond to --help correctly"
+
+test-plugin: ## Verify the Claude Code plugin and its marketplace entry carry the same version
+	@plugin=$$(jq -r .version coding-agent-plugins/claude-code/.claude-plugin/plugin.json); \
+	entry=$$(jq -r '.plugins[] | select(.name == "fprochazka-gitconfig") | .version' .claude-plugin/marketplace.json); \
+	if [[ -z "$$plugin" || "$$plugin" != "$$entry" ]]; then \
+		echo "FAIL: plugin.json version '$$plugin' differs from marketplace.json version '$$entry'"; exit 1; \
+	fi; \
+	echo "Plugin and marketplace entry are both at version $$plugin"
