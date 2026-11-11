@@ -47,6 +47,11 @@ declare -rA YES_ANSWERS=(
     [remove-orphans]=n          # orphaned directories are never deleted
 )
 
+# Set by check_recent_session_activity when the caller is a Claude Code session and
+# no other session was active in the worktree: under --yes-safe its recently
+# written files then count as that session's own and do not stop the run
+OWN_SESSION_ONLY=false
+
 # --force: clean up the current worktree although its branch is not merged (the
 # branch is then kept). Overrides nothing else: every other safety stop still stops.
 FORCE_UNMERGED=false
@@ -131,7 +136,11 @@ Options:
                         plain removal, ...) stops the run instead. Only inside a
                         linked worktree; combines with --dry-run and --force.
                         Refuses a worktree with Claude session activity in the
-                        last 24 hours (--force does not override that)
+                        last 24 hours (--force does not override that). Run from
+                        a Claude Code session, its own activity does not count
+                        (CLAUDE_CODE_SESSION_ID, sub-agents included), and when
+                        no other session was active, recently written files
+                        count as its own and do not stop the run
     --force             Clean up the current worktree although its branch is not
                         merged (see below); the branch is kept. Overrides only
                         that refusal: unsaved changes, recently written files,
@@ -1005,18 +1014,29 @@ require_merged_or_force() {
 # A Claude session may still be working in the worktree: under --yes-safe die
 # before anything is touched when one was active within RECENT_SESSION_SECONDS
 # (or when that cannot be determined); interactively only warn, the user decides.
-# --force does not override it.
+# --force does not override it. Run from a Claude Code session, that session's
+# own activity (CLAUDE_CODE_SESSION_ID, sub-agents included) does not count, so a
+# session can clean up its own worktree but never one another session works in;
+# when no other session was active, OWN_SESSION_ONLY is set.
 # Usage: check_recent_session_activity <worktree_path>
 check_recent_session_activity() {
     local wt="$1" last age when=""
-    if last=$(claude_last_activity_for_path "$wt"); then
-        [[ "$last" -gt 0 ]] || return 0
+    local own_session="${CLAUDE_CODE_SESSION_ID:-}"
+    [[ "$own_session" =~ ^[A-Za-z0-9_-]+$ ]] || own_session=""
+    if last=$(claude_last_activity_for_path "$wt" "$own_session"); then
+        if [[ "$last" -eq 0 ]]; then
+            [[ -z "$own_session" ]] || OWN_SESSION_ONLY=true
+            return 0
+        fi
         age=$(( $(date +%s) - last ))
         # A timestamp in the future (clock skew) counts as just now
         if (( age < 0 )); then
             age=0
         fi
-        [[ "$age" -lt "$RECENT_SESSION_SECONDS" ]] || return 0
+        if [[ "$age" -ge "$RECENT_SESSION_SECONDS" ]]; then
+            [[ -z "$own_session" ]] || OWN_SESSION_ONLY=true
+            return 0
+        fi
         if [[ "$age" -lt 3600 ]]; then
             when="$(( age / 60 )) min ago"
         else
@@ -1028,9 +1048,9 @@ check_recent_session_activity() {
     fi
 
     if [[ "$ASSUME_YES" == true ]]; then
-        die "Claude session activity in this worktree ${when}; this worktree was not removed. Run without --yes-safe to decide interactively."
+        die "Claude session activity in this worktree ${when}${own_session:+ (other than this session)}; this worktree was not removed. Run without --yes-safe to decide interactively."
     fi
-    warn "Claude session activity in this worktree ${when}; a session may still be working here."
+    warn "Claude session activity in this worktree ${when}${own_session:+ (other than this session)}; a session may still be working here."
 }
 
 # Remove a worktree and optionally its branch. When the worktree has keeper
@@ -1154,7 +1174,10 @@ remove_worktree() {
         local newest age
         newest=$(newest_mtime "$selected_path" "${keepers[@]}")
         age=$(( $(date +%s) - newest ))
-        if [[ "$newest" -gt 0 ]] && [[ "$age" -lt "$RECENT_WRITE_SECONDS" ]]; then
+        if [[ "$newest" -gt 0 ]] && [[ "$age" -lt "$RECENT_WRITE_SECONDS" ]] \
+            && [[ "$ASSUME_YES" == true && "$OWN_SESSION_ONLY" == true ]]; then
+            echo "The newest of these files was written ${age} s ago; no Claude session other than this one was active here, so they count as its own (--yes-safe)."
+        elif [[ "$newest" -gt 0 ]] && [[ "$age" -lt "$RECENT_WRITE_SECONDS" ]]; then
             warn "The newest of these files was written ${age} s ago; something (a Claude session?) may still be writing in this worktree."
             ask recent-write "Continue removing it? [y/N]: " "this worktree was not removed"
             [[ "$ASK_ANSWER" =~ ^[Yy]$ ]] || die "Aborted; this worktree was not removed."

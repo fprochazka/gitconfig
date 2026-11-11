@@ -1069,9 +1069,14 @@ claude_sessions_for_path() {
 # later than the real activity, or its mtime when it has none. Returns non-zero
 # when anything cannot be read or searched (a Claude config dir, a projects dir, a
 # project dir, a transcript); callers must treat that as recent activity.
-# Usage: claude_last_activity_for_path <dir_path>
+# With a session id, that session's transcripts are left out: <id>.jsonl and
+# everything under <id>/ (its sub-agents). An id that is not a plain
+# [A-Za-z0-9_-] name leaves nothing out.
+# Usage: claude_last_activity_for_path <dir_path> [exclude_session_id]
 claude_last_activity_for_path() {
     local slug root projects_dir project transcript ts epoch newest=0
+    local exclude_session="${2:-}"
+    [[ "$exclude_session" =~ ^[A-Za-z0-9_-]+$ ]] || exclude_session=""
 
     # An existing but unreadable Claude config dir would hide its sessions
     local -a roots=("${HOME}/.claude" "${HOME}/.claude/projects")
@@ -1118,6 +1123,11 @@ claude_last_activity_for_path() {
         find -P "$project" -name '*.jsonl' \( -type f -o -type l \) -print0 > "$transcripts_file" || return 1
         mapfile -d '' -t transcripts < "$transcripts_file"
         for transcript in "${transcripts[@]}"; do
+            if [[ -n "$exclude_session" ]]; then
+                case "${transcript#"${project}/"}" in
+                    "${exclude_session}.jsonl"|"${exclude_session}/"*) continue ;;
+                esac
+            fi
             [[ -e "$transcript" ]] || continue
             [[ -f "$transcript" && -r "$transcript" ]] || return 1
             ts=$(tail -c 65536 -- "$transcript" | grep -a -o '"timestamp":"[^"]*"' | tail -n 1 | cut -d'"' -f4) || ts=""
