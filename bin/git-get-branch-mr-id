@@ -35,7 +35,7 @@ Exit codes:
 
 Examples:
     git get-branch-mr-id
-    git get-branch-mr-id fp/SCEX-123-some-feature
+    git get-branch-mr-id fp/ABC-123-some-feature
 EOF
 }
 
