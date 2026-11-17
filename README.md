@@ -166,3 +166,14 @@ make test-help   # Verify all scripts respond to --help
 ### Requirements
 
 - [shellcheck](https://github.com/koalaman/shellcheck) - Install via `apt install shellcheck` or `brew install shellcheck`
+
+### Commit hooks
+
+These commands run against real repositories, issue trackers and GitLab instances, so branch names, ticket keys, host names and local paths from them end up in terminals, scratch files and test runs, and from there they can slip into a commit. `scripts/hooks` holds a pre-commit and a commit-msg hook that refuse a commit when a staged line or the commit message matches a private identifier. The identifiers live in a file outside the repository, because listing them here would publish the strings the hooks exist to keep out. Set it up once per clone:
+
+```bash
+git config core.hooksPath scripts/hooks
+git config hooks.forbiddenPatternsFile ~/.config/git/forbidden-patterns.txt  # any path outside the repo
+```
+
+The file holds one extended regex per line, matched case-insensitively; blank lines and `#` comments are ignored. Until `hooks.forbiddenPatternsFile` points at a file with at least one pattern, both hooks refuse every commit and print how to fix it. The hooks check only added lines, so content committed before them is not checked. Docs and examples use placeholder names such as `my-company` and `gitlab.example.com`.
